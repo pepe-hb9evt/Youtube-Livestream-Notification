@@ -14,6 +14,7 @@ Usage:
     python ut_livestream_monitor.py               normal run
     python ut_livestream_monitor.py --dry-run     check feeds, print result, send nothing, keep state unchanged
     python ut_livestream_monitor.py --test-mail   send a test e-mail and exit
+    python ut_livestream_monitor.py --send-list   send the last video list (state of the last run) by e-mail
     python ut_livestream_monitor.py --reset       forget known videos (next run re-creates the baseline)
     python ut_livestream_monitor.py --status      show an overview of feed errors per channel
 
@@ -637,6 +638,24 @@ def format_published(value: str) -> str:
         return value or "unknown"
 
 
+# Shown behind the channel name: what kind of entry the list shows for this channel
+FEED_TYPE_LABELS = {
+    "streams": "[only live streams]",
+    "longvideos": "[only videos]",
+    "shorts": "[only shorts]",
+    "all": "[all uploads]",
+}
+
+
+def feed_type_label(channel_cfg: dict, ch_state: dict) -> str:
+    """Label of the monitored feed, from channels.json (or the state if invalid)."""
+    try:
+        feed_type = detect_feed_type(channel_cfg)
+    except ValueError:
+        feed_type = ch_state.get("feed_type") or feed_type_from_url(ch_state.get("feed_url"))
+    return FEED_TYPE_LABELS.get(feed_type, "[unknown feed type]")
+
+
 LATEST_SORT_NOTE = ("Sorted by: publication date, newest first "
                     "(channels without a known video at the end)")
 
@@ -657,6 +676,7 @@ def collect_latest_items(channels: list, state: dict) -> list:
         ch_state = state.get("channels", {}).get(channel_cfg["url"]) or {}
         items.append({
             "name": channel_cfg.get("name") or channel_cfg["url"],
+            "label": feed_type_label(channel_cfg, ch_state),
             "video": ch_state.get("latest_video"),
             "failures": ch_state.get("consecutive_failures", 0),
         })
@@ -671,7 +691,7 @@ def build_latest_overview(channels: list, state: dict) -> list:
     lines = [LATEST_SORT_NOTE, ""]
     for item in collect_latest_items(channels, state):
         video = item["video"]
-        lines.append(item["name"])
+        lines.append(f"{item['name']} {item['label']}")
         if video:
             lines.append(f"{g}'{video['title']}'")
             lines.append(f"{g}{video['link']}")
@@ -711,7 +731,7 @@ def build_latest_markdown(channels: list, state: dict, updated: str) -> str:
     ]
     for item in collect_latest_items(channels, state):
         video = item["video"]
-        lines.append(f"Channel: {md_escape(item['name'])}  ")
+        lines.append(f"Channel: {md_escape(item['name'])} {item['label']}  ")
         if video:
             lines.append(f"Last video: [{md_escape(video['title'])}]({video['link']})  ")
             lines.append(f"Published: {format_published(video.get('published'))} --- "
@@ -793,6 +813,24 @@ def run(args, log: RunLog) -> int:
             return 0
         except Exception as exc:
             log.note(f"ERROR: Test mail failed: {exc}")
+            return 1
+
+    if args.send_list:
+        # Mail the last video per channel as known from the last run (no feed access)
+        log.mode = "send list"
+        log.mail_triggered = True
+        channels = [c for c in load_json(CHANNELS_FILE).get("channels", []) if c.get("enabled", True)]
+        overview = build_latest_overview(channels, load_json(STATE_FILE, default={"channels": {}}))
+        last_run = (short_time(dt.datetime.fromtimestamp(STATE_FILE.stat().st_mtime).strftime(TIMESTAMP_FORMAT))
+                    if STATE_FILE.exists() else "never")
+        body = "\n".join([f"Last video per channel - state of last run {last_run}"]
+                         + overview[:1] + ["=" * 25] + overview[1:])
+        try:
+            send_mail(settings, secrets, "Last video per channel", body)
+            log.note("Last video list sent")
+            return 0
+        except Exception as exc:
+            log.note(f"ERROR: Sending last video list failed: {exc}")
             return 1
 
     channels = [c for c in load_json(CHANNELS_FILE).get("channels", []) if c.get("enabled", True)]
@@ -1049,6 +1087,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="YouTube livestream change notifier")
     parser.add_argument("--dry-run", action="store_true", help="check only, send no mail, keep state unchanged")
     parser.add_argument("--test-mail", action="store_true", help="send a test mail and exit")
+    parser.add_argument("--send-list", action="store_true", help="send the last video list by e-mail and exit")
     parser.add_argument("--reset", action="store_true", help="forget known videos (new baseline on next run)")
     parser.add_argument("--status", action="store_true", help="show an overview of feed errors per channel")
     parser.add_argument("--dev-window", action="store_true", help=argparse.SUPPRESS)  # set by dev mode
