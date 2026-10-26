@@ -6,7 +6,11 @@
 
 ( English version of this document available: [README.md](README.md) )
 
-Überwacht YouTube-Kanäle über deren öffentliche RSS-Feeds und verschickt eine E-Mail nur, wenn ein neuer Eintrag erscheint. Wiederkehrende Fehler lösen höchstens eine Fehler-Mail pro Tag aus.
+Ein Python-Skript, das die Live-Streams deiner Lieblingskanäle auf YouTube über deren öffentliche RSS-Feeds überwacht und sofort eine E-Mail verschickt, sobald ein neuer Eintrag erscheint.
+
+Anstelle von Live-streams ist das Python-Skript auch so parametrierbar, dass nur "Shorts" oder nur Videos ("long form videos") überwacht werden.
+
+Wiederkehrende Fehler lösen höchstens eine Fehler-E-Mail pro Tag aus.
 
 Keine zusätzlichen Pakete nötig - nur die Standardbibliothek von Python 3.8+.
 
@@ -27,6 +31,8 @@ Keine zusätzlichen Pakete nötig - nur die Standardbibliothek von Python 3.8+.
 | `state/state.json` | Bekannte Video-IDs und Fehlerzähler (automatisch) |
 | `logs/log-last-3-days.txt` | Protokoll der Läufe, neuester Lauf zuoberst, ältere Zeilen werden automatisch gelöscht |
 | `logs/mail-log-last-16-days.txt` | Mail-Protokoll: nur Läufe, die eine Mail verschickt (oder es versucht) haben, neuester Lauf zuoberst, 16 Tage aufbewahrt |
+| `logs/last-video-per-channel.txt` | Neuestes Video jedes Kanals (Titel, Link, Veröffentlichung, Meldezeit), neueste Veröffentlichung zuoberst, bei jedem Lauf nachgeführt |
+| `logs/last-video-per-channel.md` | Dieselbe Übersicht als Markdown-Liste mit anklickbaren Links (Channel, Last video, Published, Detected, bei Bedarf Note) |
 
 <br>
 
@@ -51,10 +57,13 @@ Keine zusätzlichen Pakete nötig - nur die Standardbibliothek von Python 3.8+.
 ```
 
 `feed_type`:
-- `auto` - URL endet auf `/streams` oder `/live` -> nur Livestreams, sonst alle Uploads
-- `streams` - nur Livestreams. Es gibt keinen Rückfall auf alle Uploads: Ist der Livestream-Feed
-  nicht erreichbar (z. B. 404), gilt das als Fehler.
-- `all` - alle Uploads des Kanals
+- `auto` - abgeleitet vom Ende der URL: `/streams` oder `/live` -> `streams`, `/videos` -> `longvideos`, `/shorts` -> `shorts`, sonst `all`
+- `streams` - nur Livestreams
+- `longvideos` - nur normale (lange) Videos, keine Shorts und keine Livestreams. Shorts, die vereinzelt in diesem Feed auftauchen, werden herausgefiltert.
+- `shorts` - nur Shorts
+- `all` - alle Uploads des Kanals (Videos, Shorts, Livestreams)
+
+Es gibt keinen Rückfall auf einen anderen Feed: Ist ein Feed nicht erreichbar (z. B. 404), gilt das als Fehler. Ändert sich der `feed_type` eines Kanals, wird ein neuer Ausgangsstand erstellt (keine Mail). Ein unbekannter `feed_type` wird als Fehler protokolliert. Die Feeds `streams`, `longvideos` und `shorts` sind Playlists, die YouTube nicht offiziell dokumentiert.
 
 <br>
 
@@ -95,6 +104,7 @@ Die Grenze (#10) ist `min_consecutive_failures`. Kanäle, die noch nie geprüft 
 - **Erster Lauf pro Kanal**: speichert die aktuellen Einträge als Ausgangsstand, keine Mail.
 - **Neuer Eintrag**: eine Sammelmail für alle Kanäle mit neuen Einträgen.
   Schlägt der Versand fehl, werden die Einträge beim nächsten Lauf erneut versucht.
+- **Neuestes Video pro Kanal**: Bei jedem Lauf (auch Dry Run) listet `logs/last-video-per-channel.txt` das neueste Video jedes Kanals auf: Titel, Link, Veröffentlichungszeit (YouTube) und den Zeitpunkt, zu dem das Skript es erstmals erkannt hat. Die Liste ist nach Veröffentlichungsdatum sortiert, die neueste zuoberst; Kanäle ohne bekanntes Video stehen am Schluss. Das Sortierkriterium steht unterhalb der Titelzeile. Kanäle mit gestörtem Feed werden gekennzeichnet. Dieselbe Übersicht wird als Markdown-Liste mit anklickbaren Links gespeichert (`logs/last-video-per-channel.md`) und steht am Ende jeder Mail (Benachrichtigung, Fehler-Mail und Testmail).
 - **Fehler** (Feed nicht erreichbar, HTTP 404 / 500, Kanal nicht gefunden ...): Eine fehlgeschlagene
   Abfrage wird nach 5 Sekunden einmal wiederholt. Schlägt sie erneut fehl, wird der Fehler protokolliert.
   Schlagen so die ersten 3 Kanäle eines Laufs fehl, hat YouTube offensichtlich eine Störung: Die restlichen

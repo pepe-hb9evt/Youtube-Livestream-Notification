@@ -7,8 +7,20 @@
       "enabled": true
     },
     {
-      "name": "Example Bravo (all uploads)",
-      "url": "https://www.youtube.com/@example-bravo",
+      "name": "Example Bravo (normal videos only, no shorts)",
+      "url": "https://www.youtube.com/@example-bravo/videos",
+      "feed_type": "auto",
+      "enabled": true
+    },
+    {
+      "name": "Example Charlie (shorts only)",
+      "url": "https://www.youtube.com/@example-charlie",
+      "feed_type": "shorts",
+      "enabled": false
+    },
+    {
+      "name": "Example Delta (all uploads)",
+      "url": "https://www.youtube.com/@example-delta",
       "feed_type": "all",
       "enabled": false
     }

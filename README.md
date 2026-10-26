@@ -2,9 +2,13 @@
 
 ( German: ***Deutsche Version** dieses README verfügbar:* [README_deutsch_german.md](README_deutsch_german.md) )
 
-Watches YouTube channels via their public RSS feeds and sends an e-mail only when a new entry appears. Recurring errors trigger at most one error e-mail per day.
+A Python script that monitors the live streams of your favorite YouTube channels via their public RSS feeds and immediately sends an email as soon as a new entry appears.
 
-No extra packages needed - Python 3.8+ standard library only.
+Instead of live streams, the Python script can also be configured to monitor only “Shorts” or only videos (“long-form videos”).
+
+Recurring errors trigger at most one error email per day.
+
+No additional packages required—just the standard library of Python 3.8+.
 
 <br>
 
@@ -23,6 +27,8 @@ No extra packages needed - Python 3.8+ standard library only.
 | `state/state.json` | Known video IDs and error counters (auto) |
 | `logs/log-last-3-days.txt` | Run log, newest run on top, older lines are trimmed automatically |
 | `logs/mail-log-last-16-days.txt` | Mail log: only runs that sent (or tried to send) a mail, newest run on top, kept for 16 days |
+| `logs/last-video-per-channel.txt` | Newest video of every channel (title, link, published, detected), newest publication first, updated on every run |
+| `logs/last-video-per-channel.md` | Same overview as Markdown list with clickable links (Channel, Last video, Published, Detected, Note if needed) |
 
 <br>
 
@@ -47,10 +53,13 @@ No extra packages needed - Python 3.8+ standard library only.
 ```
 
 `feed_type`:
-- `auto` - URL ends with `/streams` or `/live` -> live streams only, otherwise all uploads
-- `streams` - live streams only. There is no fallback to all uploads: if the stream feed
-  is not available (e.g. 404), this is treated as an error.
-- `all` - every upload of the channel
+- `auto` - derived from the end of the URL: `/streams` or `/live` -> `streams`, `/videos` -> `longvideos`, `/shorts` -> `shorts`, otherwise `all`
+- `streams` - live streams only
+- `longvideos` - normal (long-form) videos only, no shorts and no live streams. Shorts that occasionally appear in this feed are filtered out.
+- `shorts` - shorts only
+- `all` - every upload of the channel (videos, shorts, live streams)
+
+There is no fallback to another feed: if a feed is not available (e.g. 404), this is treated as an error. If the `feed_type` of a channel changes, a new baseline is created (no mail). An unknown `feed_type` is logged as error. The feeds `streams`, `longvideos` and `shorts` are playlists that are not officially documented by YouTube.
 
 <br>
 
@@ -91,6 +100,7 @@ are listed as "not checked yet".
 - **First run per channel**: stores the current entries as baseline, no mail.
 - **New entry**: one combined mail for all channels with new entries.
   If sending fails, the entries are retried on the next run.
+- **Last video per channel**: on every run (also dry run) `logs/last-video-per-channel.txt` lists the newest video of every channel: title, link, publication time (YouTube) and the time this script first detected it. The list is sorted by publication date, newest first; channels without a known video are at the end. The sort order is stated below the title line. Channels with a failing feed are marked. The same overview is saved as Markdown list with clickable links (`logs/last-video-per-channel.md`) and added at the end of every mail (notification, error mail and test mail).
 - **Errors** (feed unreachable, HTTP 404 / 500, channel not found ...): a failed request
   is retried once after 5 seconds. If it fails again, the error is logged.
   If the first 3 channels of a run all fail this way, YouTube obviously has an outage:

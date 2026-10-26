@@ -57,6 +57,8 @@ STATE_FILE = STATE_DIR / "state.json"
 LOCK_FILE = STATE_DIR / "monitor.lock"
 LOG_FILE = LOG_DIR / "log-last-3-days.txt"
 MAIL_LOG_FILE = LOG_DIR / "mail-log-last-16-days.txt"
+LATEST_FILE = LOG_DIR / "last-video-per-channel.txt"
+LATEST_MD_FILE = LOG_DIR / "last-video-per-channel.md"
 
 PASSWORD_PLACEHOLDER = "PUT-YOUR-GMAIL-APP-PASSWORD-HERE"
 MAX_KNOWN_IDS_PER_CHANNEL = 500
@@ -433,22 +435,55 @@ def resolve_channel_id(url: str, timeout: int) -> str:
     raise RuntimeError(f"Channel ID not found on page {base_url}")
 
 
+# Playlist prefixes: prefix + channel id without "UC" = playlist of the channel
+# (not officially documented by YouTube, found by the community)
+FEED_PLAYLIST_PREFIX = {
+    "streams": "UULV",      # live streams only
+    "longvideos": "UULF",   # normal (long-form) videos only, no shorts
+    "shorts": "UUSH",       # shorts only
+}
+FEED_TYPES = list(FEED_PLAYLIST_PREFIX) + ["all"]   # "all" = channel feed, every upload
+
+
 def detect_feed_type(channel_cfg: dict) -> str:
-    """'streams' = live-stream playlist only, 'all' = every upload of the channel.
-    There is deliberately no fallback from 'streams' to 'all': during YouTube
-    outages the stream feed returns 404, and a fallback would report ordinary
-    uploads as new entries."""
+    """Feed type of a channel: explicit 'feed_type' or derived from the URL (auto).
+    There is deliberately no fallback to another feed: during YouTube outages
+    the feeds return 404, and a fallback would report other uploads as new entries."""
     feed_type = channel_cfg.get("feed_type", "auto")
-    if feed_type in ("streams", "all"):
+    if feed_type in FEED_TYPES:
         return feed_type
-    return "streams" if re.search(r"/(streams|live)/?$", channel_cfg["url"]) else "all"
+    if feed_type != "auto":
+        raise ValueError(f"unknown feed_type '{feed_type}' (allowed: auto, {', '.join(FEED_TYPES)})")
+    url = channel_cfg["url"]
+    if re.search(r"/(streams|live)/?$", url):
+        return "streams"
+    if re.search(r"/videos/?$", url):
+        return "longvideos"
+    if re.search(r"/shorts/?$", url):
+        return "shorts"
+    return "all"
+
+
+def feed_type_from_url(feed_url: str):
+    """Feed type of a previously used feed URL (for state files without 'feed_type')."""
+    if not feed_url:
+        return None
+    for feed_type, prefix in FEED_PLAYLIST_PREFIX.items():
+        if f"playlist_id={prefix}" in feed_url:
+            return feed_type
+    return "all" if "channel_id=" in feed_url else None
 
 
 def build_feed_url(channel_id: str, feed_type: str) -> str:
-    if feed_type == "streams":
-        # UULV + channel id without "UC" = the channel's live-stream playlist
-        return f"https://www.youtube.com/feeds/videos.xml?playlist_id=UULV{channel_id[2:]}"
+    prefix = FEED_PLAYLIST_PREFIX.get(feed_type)
+    if prefix:
+        return f"https://www.youtube.com/feeds/videos.xml?playlist_id={prefix}{channel_id[2:]}"
     return f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+
+
+def is_short(entry: dict) -> bool:
+    """Shorts are linked as youtube.com/shorts/<id> in the feed."""
+    return "/shorts/" in entry.get("link", "")
 
 
 def parse_feed(xml_bytes: bytes) -> list:
@@ -476,9 +511,22 @@ def fetch_entries(channel_cfg: dict, ch_state: dict, timeout: int, log: RunLog) 
         ch_state["channel_id"] = resolve_channel_id(channel_cfg["url"], timeout)
         ch_state["resolved_now"] = True  # reported together with the baseline
 
-    feed_url = build_feed_url(ch_state["channel_id"], detect_feed_type(channel_cfg))
+    feed_type = detect_feed_type(channel_cfg)
+    feed_url = build_feed_url(ch_state["channel_id"], feed_type)
+    entries = parse_feed(http_get_with_retry(feed_url, timeout))
+    if feed_type == "longvideos":
+        # Safety net: the long-form playlist occasionally contains shorts
+        entries = [e for e in entries if not is_short(e)]
+
+    # Feed type changed (e.g. "all" -> "longvideos"): create a new baseline,
+    # otherwise the entries of the new feed would be reported as new
+    previous = ch_state.get("feed_type") or feed_type_from_url(ch_state.get("feed_url"))
+    if previous and previous != feed_type and ch_state.get("initialized"):
+        ch_state["initialized"] = False
+        ch_state["feed_changed"] = f"{previous} -> {feed_type}"
+    ch_state["feed_type"] = feed_type
     ch_state["feed_url"] = feed_url
-    return parse_feed(http_get_with_retry(feed_url, timeout))
+    return entries
 
 
 # --------------------------------------------------------------------------
@@ -511,8 +559,8 @@ def send_mail(settings: dict, secrets: dict, subject: str, body: str) -> None:
             server.send_message(msg)
 
 
-def format_new_entries_mail(new_by_channel: list) -> tuple:
-    """new_by_channel: [(name, [entries], delay_note or None)]"""
+def format_new_entries_mail(new_by_channel: list, overview: list) -> tuple:
+    """new_by_channel: [(name, [entries], delay_note or None)], overview: see build_latest_overview"""
     total = sum(len(items) for _, items, _ in new_by_channel)
     names = ", ".join(name for name, _, _ in new_by_channel)
     subject = f"{total} new entr{'y' if total == 1 else 'ies'}: {names}"
@@ -528,13 +576,14 @@ def format_new_entries_mail(new_by_channel: list) -> tuple:
             lines.append(f"- {item['title']}")
             lines.append(f"  {item['link']}")
             if item.get("published"):
-                lines.append(f"  Published: {item['published']}")
+                lines.append(f"  Published: {format_published(item['published'])}")
         lines.append("")
     lines.append(f"Checked: {dt.datetime.now().strftime(TIMESTAMP_FORMAT)}")
+    lines.extend(mail_overview_section(overview))
     return subject, "\n".join(lines)
 
 
-def format_error_mail(failing: list, threshold: int) -> tuple:
+def format_error_mail(failing: list, threshold: int, overview: list) -> tuple:
     subject = f"Recurring error on {len(failing)} source(s)"
     lines = [
         f"The following sources failed at least {threshold} times in a row.",
@@ -549,7 +598,153 @@ def format_error_mail(failing: list, threshold: int) -> tuple:
         lines.append(f"  Last success:         {ch_state.get('last_success') or 'never'}")
         lines.append("")
     lines.append(f"Details: logs/{LOG_FILE.name}")
+    lines.extend(mail_overview_section(overview))
     return subject, "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# Last video per channel (text file + section in every mail)
+# --------------------------------------------------------------------------
+def newest_entry(entries: list):
+    """Newest feed entry by publish date (first entry if dates are missing)."""
+    if not entries:
+        return None
+    return max(entries, key=lambda e: e.get("published") or "")
+
+
+def update_latest_video(ch_state: dict, entries: list, now_str: str) -> None:
+    """Remember the newest video of the feed; 'detected' is when this script
+    first saw it as the newest one."""
+    newest = newest_entry(entries)
+    if not newest:
+        return
+    previous = ch_state.get("latest_video") or {}
+    detected = previous.get("detected") if previous.get("video_id") == newest["video_id"] else None
+    ch_state["latest_video"] = {
+        "video_id": newest["video_id"],
+        "title": newest["title"],
+        "link": newest["link"],
+        "published": newest.get("published", ""),
+        "detected": detected or now_str,
+    }
+
+
+def format_published(value: str) -> str:
+    """'2026-10-25T21:30:00+00:00' -> local time '2026-10-25 22:30'."""
+    try:
+        return dt.datetime.fromisoformat(value).astimezone().strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return value or "unknown"
+
+
+LATEST_SORT_NOTE = ("Sorted by: publication date, newest first "
+                    "(channels without a known video at the end)")
+
+
+def published_sort_key(video: dict):
+    """Publication time as UTC timestamp for sorting (0 if unknown)."""
+    try:
+        return dt.datetime.fromisoformat(video.get("published") or "").timestamp()
+    except (TypeError, ValueError):
+        return 0
+
+
+def collect_latest_items(channels: list, state: dict) -> list:
+    """[{name, video or None, failures}] sorted by publication date, newest first.
+    Channels without a known video keep their channels.json order at the end."""
+    items = []
+    for channel_cfg in channels:
+        ch_state = state.get("channels", {}).get(channel_cfg["url"]) or {}
+        items.append({
+            "name": channel_cfg.get("name") or channel_cfg["url"],
+            "video": ch_state.get("latest_video"),
+            "failures": ch_state.get("consecutive_failures", 0),
+        })
+    with_video = sorted((i for i in items if i["video"]),
+                        key=lambda i: published_sort_key(i["video"]), reverse=True)
+    return with_video + [i for i in items if not i["video"]]
+
+
+def build_latest_overview(channels: list, state: dict) -> list:
+    """Plain-text lines listing the newest known video of every channel."""
+    g = RunLog.INDENT_GROUP
+    lines = [LATEST_SORT_NOTE, ""]
+    for item in collect_latest_items(channels, state):
+        video = item["video"]
+        lines.append(item["name"])
+        if video:
+            lines.append(f"{g}'{video['title']}'")
+            lines.append(f"{g}{video['link']}")
+            lines.append(f"{g}Published: {format_published(video.get('published'))}"
+                         f" --- Detected: {short_time(video.get('detected'))}")
+        else:
+            lines.append(f"{g}no video known yet")
+        if item["failures"]:
+            lines.append(f"{g}(feed currently failing: failure #{item['failures']})")
+        lines.append("")
+    return lines
+
+
+def md_escape(text: str) -> str:
+    """Escape characters that would break a Markdown table cell or link text."""
+    for char in ("\\", "|", "[", "]", "*", "_", "`"):
+        text = text.replace(char, "\\" + char)
+    return text
+
+
+def short_time(value: str) -> str:
+    """'2026-10-26 09:45:55' -> '2026-10-26 09:45' (times as hh:mm)."""
+    parsed = parse_timestamp(value)
+    return parsed.strftime("%Y-%m-%d %H:%M") if parsed else (value or "unknown")
+
+
+def build_latest_markdown(channels: list, state: dict, updated: str) -> str:
+    """Markdown list: one block of 3-4 lines per channel, titles as clickable links.
+    Lines end with two spaces = line break within the block. Times as hh:mm."""
+    lines = [
+        "# Last video per channel",
+        "",
+        f"Updated: {short_time(updated)}  ",
+        LATEST_SORT_NOTE,
+        "<br>",
+        "",
+    ]
+    for item in collect_latest_items(channels, state):
+        video = item["video"]
+        lines.append(f"Channel: {md_escape(item['name'])}  ")
+        if video:
+            lines.append(f"Last video: [{md_escape(video['title'])}]({video['link']})  ")
+            lines.append(f"Published: {format_published(video.get('published'))} --- "
+                         f"Detected: {short_time(video.get('detected'))}  ")
+        else:
+            lines.append("Last video: no video known yet  ")
+            lines.append("Published: - --- Detected: -  ")
+        if item["failures"]:
+            lines.append(f"Note: feed currently failing (failure #{item['failures']})  ")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def write_atomic_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(text, encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+def write_latest_files(channels: list, state: dict, overview: list) -> None:
+    """Write the overview as plain text and as Markdown (with clickable links)."""
+    updated = dt.datetime.now().strftime(TIMESTAMP_FORMAT)
+    # overview starts with the "Sorted by" line; the text file gets a separator below it
+    text_lines = [f"Last video per channel - updated {short_time(updated)}"] + overview[:1] + ["=" * 25] + overview[1:]
+    write_atomic_text(LATEST_FILE, "\n".join(text_lines))
+    write_atomic_text(LATEST_MD_FILE, build_latest_markdown(channels, state, updated))
+
+
+def mail_overview_section(overview: list) -> list:
+    if not overview:
+        return []
+    return ["", "-" * 40, "Last video per channel:"] + overview
 
 
 # --------------------------------------------------------------------------
@@ -587,8 +782,13 @@ def run(args, log: RunLog) -> int:
         log.mode = "test mail"
         log.mail_triggered = True
         try:
-            send_mail(settings, secrets, "Test mail",
-                      f"Test mail from UT-Livestream-Notification.\nSent: {dt.datetime.now().strftime(TIMESTAMP_FORMAT)}")
+            channels = [c for c in load_json(CHANNELS_FILE).get("channels", []) if c.get("enabled", True)]
+            overview = build_latest_overview(channels, load_json(STATE_FILE, default={"channels": {}}))
+        except Exception:
+            overview = []
+        try:
+            body = f"Test mail from UT-Livestream-Notification.\nSent: {dt.datetime.now().strftime(TIMESTAMP_FORMAT)}"
+            send_mail(settings, secrets, "Test mail", "\n".join([body] + mail_overview_section(overview)))
             log.note("Test mail sent")
             return 0
         except Exception as exc:
@@ -658,6 +858,7 @@ def run(args, log: RunLog) -> int:
                 # Remember the outage, new entries in the next minutes may be delayed
                 ch_state["last_outage"] = {"start": ch_state.get("first_failure") or now_str, "end": now_str}
             ch_state.update(consecutive_failures=0, first_failure=None, last_error=None, last_success=now_str)
+            update_latest_video(ch_state, entries, now_str)
 
             known = set(ch_state.get("known_video_ids", []))
             if not ch_state.get("initialized"):
@@ -665,7 +866,9 @@ def run(args, log: RunLog) -> int:
                 ch_state["known_video_ids"] = [e["video_id"] for e in entries]
                 ch_state["initialized"] = True
                 resolved = f"channel ID {ch_state['channel_id']} resolved, " if resolved_now else ""
-                log.add("Baseline created", name, f"{resolved}{len(entries)} entries stored")
+                feed_changed = ch_state.pop("feed_changed", None)
+                changed = f"feed changed ({feed_changed}), " if feed_changed else ""
+                log.add("Baseline created", name, f"{changed}{resolved}{len(entries)} entries stored")
                 status = "OK, baseline created"
                 continue
 
@@ -697,9 +900,16 @@ def run(args, log: RunLog) -> int:
                 log.note(message)
                 progress(message)
 
+    # --- Last video per channel: text file (also in dry runs) and mail section ---
+    overview = build_latest_overview(channels, state)
+    try:
+        write_latest_files(channels, state, overview)
+    except OSError as exc:
+        log.note(f"ERROR: Writing {LATEST_FILE.name} / {LATEST_MD_FILE.name} failed: {exc}")
+
     # --- Notification about new entries ---
     if new_by_channel:
-        subject, body = format_new_entries_mail(new_by_channel)
+        subject, body = format_new_entries_mail(new_by_channel, overview)
         if args.dry_run:
             log.note(f"Mail not sent (dry run): {subject}")
             log.previews.append("----- MAIL (not sent, dry run) -----\nSubject: " + subject + "\n\n" + body + "\n-----")
@@ -723,7 +933,7 @@ def run(args, log: RunLog) -> int:
     ]
     today = dt.date.today().isoformat()
     if failing and state.get("last_error_mail_date") != today:
-        subject, body = format_error_mail(failing, threshold)
+        subject, body = format_error_mail(failing, threshold, overview)
         if args.dry_run:
             log.note(f"Error mail not sent (dry run): {len(failing)} failing channel(s)")
             log.previews.append("----- ERROR MAIL (not sent, dry run) -----\nSubject: " + subject + "\n\n" + body + "\n-----")
