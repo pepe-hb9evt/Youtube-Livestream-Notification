@@ -1,0 +1,26 @@
+# Ignore everything (/*) except the project files (allow-list with !/... ).
+# This keeps the real configuration (channels.json, settings.json, secrets.json
+# with the SMTP password), the state and the log out of Git.
+
+# Ignore everything ...
+/*
+
+# ... except this white list:
+!/.gitignore
+!/.gitattributes
+!/LICENSE
+!/README.md
+!/README_deutsch_german.md
+!/ut_livestream_monitor.py
+!/install_task.ps1
+
+# config folder: only the example files and the batch files
+!/config/
+/config/*
+!/config/*.example.json
+!/config/run_monitor.bat
+!/config/run_monitor_menu.bat
+
+# Python
+__pycache__/
+*.pyc

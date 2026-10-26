@@ -1,0 +1,16 @@
+{
+  "channels": [
+    {
+      "name": "Example Alpha (live streams only)",
+      "url": "https://www.youtube.com/@example-alpha/streams",
+      "feed_type": "auto",
+      "enabled": true
+    },
+    {
+      "name": "Example Bravo (all uploads)",
+      "url": "https://www.youtube.com/@example-bravo",
+      "feed_type": "all",
+      "enabled": false
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "smtp": {
+    "host": "smtp.gmail.com",
+    "port": 587,
+    "use_starttls": true,
+    "use_ssl": false,
+    "username": "sender@example-alpha.com"
+  },
+  "mail": {
+    "sender": "sender@example-alpha.com",
+    "recipients": ["recipient@example-bravo.com"],
+    "subject_prefix": "[UT-Livestream]"
+  },
+  "check_interval_minutes": 5,
+  "http_timeout_seconds": 20,
+  "log_retention_days": 3,
+  "mail_log_retention_days": 16,
+  "delay_note_window_minutes": 50,
+  "dev_mode": {
+    "enabled": false,
+    "keep_open_after_run_seconds": 60
+  },
+  "error_alert": {
+    "min_consecutive_failures": 10
+  }
+}
