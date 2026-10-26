@@ -13,7 +13,7 @@ echo ============================================
 echo.
 echo   1  Normal run           (check feeds, mail on new entries)
 echo   2  Dry run              (check only, no mail, state unchanged)
-echo   3  Test mail            (send a test e-mail)
+echo   3  Send last video list (mail with the newest video per channel)
 echo   4  Reset                (forget known videos, new baseline)
 echo   5  Show log             (logs\log-last-3-days.txt)
 echo   6  Outage status        (overview of feed errors per channel)
@@ -24,7 +24,7 @@ set "selection=%ERRORLEVEL%"
 
 if "%selection%"=="1" set "args="
 if "%selection%"=="2" set "args=--dry-run"
-if "%selection%"=="3" set "args=--test-mail"
+if "%selection%"=="3" set "args=--send-list"
 if "%selection%"=="4" goto confirm_reset
 if "%selection%"=="5" goto show_log
 if "%selection%"=="6" set "args=--status"
