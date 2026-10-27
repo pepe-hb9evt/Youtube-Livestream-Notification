@@ -4,7 +4,7 @@
 #                      .\install_task.ps1 -Remove    -> uninstall
 param(
     [int]$IntervalMinutes = 5,
-    [string]$TaskName = "UT-Livestream-Notification",
+    [string]$TaskName = "PP-UT-Livestream-Notification",
     [switch]$Remove
 )
 
