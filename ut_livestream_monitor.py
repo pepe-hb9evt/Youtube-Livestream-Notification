@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
+
 """
-UT-Livestream-Notification
---------------------------
+YouTube-Livestream-Notification
+===============================
 Observes your favorite YouTube channels (configured in config/channels.json)
 via their public RSS feeds and sends an e-mail ONLY when new entries appear.
 
