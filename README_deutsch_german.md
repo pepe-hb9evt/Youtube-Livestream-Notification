@@ -1,4 +1,4 @@
-# UT-Livestream-Notification
+# YouTube-Livestream-Notification
 
 **YouTube-Livestream-Benachrichtigung**
 

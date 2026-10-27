@@ -1,4 +1,4 @@
-# UT-Livestream-Notification
+# YouTube-Livestream-Notification
 
 ( German: ***Deutsche Version** dieses README verfügbar:* [README_deutsch_german.md](README_deutsch_german.md) )
 
