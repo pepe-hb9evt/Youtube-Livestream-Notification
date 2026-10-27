@@ -11,7 +11,6 @@
     "recipients": ["recipient@example-bravo.com"],
     "subject_prefix": "[UT-Livestream]"
   },
-  "check_interval_minutes": 5,
   "http_timeout_seconds": 20,
   "log_retention_days": 3,
   "mail_log_retention_days": 16,

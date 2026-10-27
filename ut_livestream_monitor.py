@@ -1014,10 +1014,10 @@ def show_status() -> int:
                 not_checked += 1
         elif failures == 0:
             up_to_date += 1
-        elif failures <= threshold:
-            below += 1
+        elif failures < threshold:
+            below += 1   # error mail not due yet
         else:
-            above += 1
+            above += 1   # threshold reached: error mail is due (or already sent today)
 
     last_run = (dt.datetime.fromtimestamp(STATE_FILE.stat().st_mtime).strftime(TIMESTAMP_FORMAT)
                 if STATE_FILE.exists() else "never")
@@ -1027,8 +1027,13 @@ def show_status() -> int:
         f"{g}{len(channels)} channel(s) configured",
         f"{g}of which:",
         f"{c}{no_baseline} without baseline because of errors",
-        f"{c}{below} with baseline, failure #1 to #{threshold}",
-        f"{c}{above} with baseline, failure #{threshold + 1} or higher",
+    ]
+    if threshold > 1:
+        # With threshold 1 every failure is already above the limit
+        below_range = "#1" if threshold == 2 else f"#1 to #{threshold - 1}"
+        lines.append(f"{c}{below} with baseline, failure {below_range}")
+    lines += [
+        f"{c}{above} with baseline, failure #{threshold} or higher (error mail)",
         f"{c}{up_to_date} up to date",
     ]
     if not_checked:
