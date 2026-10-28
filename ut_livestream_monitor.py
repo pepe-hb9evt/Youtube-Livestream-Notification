@@ -14,8 +14,8 @@ Only the Python standard library is used - no extra packages required.
 Usage:
     python ut_livestream_monitor.py               normal run
     python ut_livestream_monitor.py --dry-run     check feeds, print result, send nothing, keep state unchanged
-    python ut_livestream_monitor.py --test-mail   send a test e-mail and exit
-    python ut_livestream_monitor.py --send-list   send the last video list (state of the last run) by e-mail
+    python ut_livestream_monitor.py --send-list   send the last video list (state of the last run) by e-mail,
+                                                  also usable as test mail (--test-mail is an alias)
     python ut_livestream_monitor.py --reset       forget known videos (next run re-creates the baseline)
     python ut_livestream_monitor.py --status      show an overview of feed errors per channel
 
@@ -108,6 +108,16 @@ class RunLog:
               Example Charlie
            Mail sent: 1 new entry: Example Alpha
            Run finished (2026-01-01 12:00:03)
+
+    In the mail log, every mail of the run follows verbatim below the block
+    (indented, so that no mail line can be taken for a block timestamp):
+
+           ----- Mail (sent) -----
+              Subject: [UT-Livestream] 1 new entry: Example Alpha
+
+              This mail informs you:
+              ...
+           ----- End of mail -----
     """
 
     INDENT_GROUP = " " * 3
@@ -126,14 +136,19 @@ class RunLog:
         self.mail_retention_days = mail_retention_days
         self.mail_triggered = False  # True if this run sent (or tried to send) a mail
         self.started = dt.datetime.now()
-        self.mode = ""              # e.g. "dry run", "test mail", "reset"
+        self.mode = ""              # e.g. "dry run", "send list", "reset"
         self.headline = None        # replaces the "Run ..." line, e.g. for skipped runs
         self.prelude = []           # lines shown directly below the headline
         self.channel_count = None
         self.groups = {}            # group -> {channel: [details]}
         self.notes = []             # general lines (mail sent, errors without channel ...)
         self.previews = []          # dry-run mail previews, printed after the block
+        self.mails = []             # (subject, body, result) of every mail of this run
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    def record_mail(self, subject: str, body: str, result: str) -> None:
+        """Remember a mail verbatim for the mail log (result: 'sent' or 'NOT sent: ...')."""
+        self.mails.append((subject, body, result))
 
     def add(self, group: str, channel: str, detail: str = None) -> None:
         """Add a channel to a group, optionally with a detail line."""
@@ -165,9 +180,23 @@ class RunLog:
         lines.append("")
         return [line + "\n" for line in lines]
 
+    def render_mails(self) -> list:
+        """The mails of this run verbatim, indented below the run block."""
+        g, c = self.INDENT_GROUP, self.INDENT_CHANNEL
+        lines = []
+        for subject, body, result in self.mails:
+            lines.append(f"{g}----- Mail ({result}) -----")
+            lines.append(f"{c}Subject: {subject}")
+            lines.append("")
+            lines.extend(f"{c}{line}" if line.strip() else "" for line in body.splitlines())
+            lines.append(f"{g}----- End of mail -----")
+            lines.append("")
+        return [line + "\n" for line in lines]
+
     def flush(self) -> None:
         """Print the block and put it on top of the run log. If the run sent
-        (or tried to send) a mail, the block is also put on top of the mail log."""
+        (or tried to send) a mail, the block plus the mails verbatim is also
+        put on top of the mail log."""
         block = self.render()
         if self.verbose:
             print("".join(block), end="")
@@ -175,7 +204,7 @@ class RunLog:
                 print(preview)
         self._prepend(self.log_file, block, self.retention_days)
         if self.mail_triggered:
-            self._prepend(self.mail_log_file, block, self.mail_retention_days)
+            self._prepend(self.mail_log_file, block + self.render_mails(), self.mail_retention_days)
 
     @staticmethod
     def _prepend(log_file: Path, block: list, retention_days: int) -> None:
@@ -544,7 +573,7 @@ def send_mail(settings: dict, secrets: dict, subject: str, body: str) -> None:
     msg = EmailMessage()
     msg["From"] = mail_cfg["sender"]
     msg["To"] = ", ".join(mail_cfg["recipients"])
-    msg["Subject"] = f"{mail_cfg.get('subject_prefix', '').strip()} {subject}".strip()
+    msg["Subject"] = full_subject(settings, subject)
     msg.set_content(body)
 
     username = smtp_cfg.get("username") or mail_cfg["sender"]
@@ -561,14 +590,55 @@ def send_mail(settings: dict, secrets: dict, subject: str, body: str) -> None:
             server.send_message(msg)
 
 
-def format_new_entries_mail(new_by_channel: list, overview: list) -> tuple:
-    """new_by_channel: [(name, [entries], delay_note or None)], overview: see build_latest_overview"""
+def full_subject(settings: dict, subject: str) -> str:
+    """Subject with the configured prefix, as it appears in the mail."""
+    prefix = settings.get("mail", {}).get("subject_prefix", "").strip()
+    return f"{prefix} {subject}".strip()
+
+
+def deliver_mail(settings: dict, secrets: dict, subject: str, body: str, log: "RunLog") -> None:
+    """send_mail() that also records the mail verbatim for the mail log.
+    Exceptions are passed on to the caller."""
+    log.mail_triggered = True
+    try:
+        send_mail(settings, secrets, subject, body)
+    except Exception as exc:
+        log.record_mail(full_subject(settings, subject), body, f"NOT sent: {exc}")
+        raise
+    log.record_mail(full_subject(settings, subject), body, "sent")
+
+
+def plural(count: int, word: str, width: int = 0) -> str:
+    """plural(1, 'channel') -> '1 channel', plural(2, 'channel') -> '2 channels'.
+    width right-aligns the number, e.g. plural(3, 'channel', 2) -> ' 3 channels'."""
+    return f"{count:>{width}} {word}{'' if count == 1 else 's'}"
+
+
+MAIL_SEPARATOR = "-" * 40
+
+
+def build_mail_body(trigger: str, status: list, details: list, latest: list) -> str:
+    """Uniform mail layout: trigger, status, triggering information, last video list."""
+    lines = ["This mail informs you:", trigger, ""] + status
+    if details:
+        lines += ["", MAIL_SEPARATOR] + details
+    if latest:
+        lines += ["", MAIL_SEPARATOR] + latest
+    return "\n".join(lines)
+
+
+def format_new_entries_mail(new_by_channel: list, status: list, latest: list) -> tuple:
+    """new_by_channel: [(name, [entries], delay_note or None)],
+    status: see build_status_lines, latest: see build_latest_text"""
     total = sum(len(items) for _, items, _ in new_by_channel)
     names = ", ".join(name for name, _, _ in new_by_channel)
-    subject = f"{total} new entr{'y' if total == 1 else 'ies'}: {names}"
+    entries_text = f"{total} new entr{'y' if total == 1 else 'ies'}"
+    subject = f"{entries_text}: {names}"
+    trigger = entries_text
     if any(note for _, _, note in new_by_channel):
         subject += " (possibly delayed)"
-    lines = ["New entries detected:", ""]
+        trigger += " (possibly delayed)"
+    lines = []
     for name, items, note in new_by_channel:
         lines.append(f"=== {name} ===")
         if note:
@@ -581,14 +651,13 @@ def format_new_entries_mail(new_by_channel: list, overview: list) -> tuple:
                 lines.append(f"  Published: {format_published(item['published'])}")
         lines.append("")
     lines.append(f"Checked: {dt.datetime.now().strftime(TIMESTAMP_FORMAT)}")
-    lines.extend(mail_overview_section(overview))
-    return subject, "\n".join(lines)
+    return subject, build_mail_body(trigger, status, lines, latest)
 
 
-def format_error_mail(failing: list, threshold: int, overview: list) -> tuple:
+def format_error_mail(failing: list, threshold: int, status: list, latest: list) -> tuple:
     subject = f"Recurring error on {len(failing)} source(s)"
+    trigger = f"{plural(len(failing), 'source')} failed at least {threshold} times in a row"
     lines = [
-        f"The following sources failed at least {threshold} times in a row.",
         "This mail is sent at most once per day.",
         "",
     ]
@@ -600,8 +669,70 @@ def format_error_mail(failing: list, threshold: int, overview: list) -> tuple:
         lines.append(f"  Last success:         {ch_state.get('last_success') or 'never'}")
         lines.append("")
     lines.append(f"Details: logs/{LOG_FILE.name}")
-    lines.extend(mail_overview_section(overview))
-    return subject, "\n".join(lines)
+    return subject, build_mail_body(trigger, status, lines, latest)
+
+
+# --------------------------------------------------------------------------
+# Status overview (used by --status and by the status section of every mail)
+# --------------------------------------------------------------------------
+def compute_status_counts(channels: list, state_channels: dict, threshold: int) -> dict:
+    """Count the channels per status, based on the saved state."""
+    counts = dict(no_baseline=0, not_checked=0, below=0, above=0, up_to_date=0)
+    for channel_cfg in channels:
+        ch_state = state_channels.get(channel_cfg["url"]) or {}
+        failures = ch_state.get("consecutive_failures", 0)
+        if not ch_state.get("initialized"):
+            counts["no_baseline" if failures > 0 else "not_checked"] += 1
+        elif failures == 0:
+            counts["up_to_date"] += 1
+        elif failures < threshold:
+            counts["below"] += 1   # error mail not due yet
+        else:
+            counts["above"] += 1   # threshold reached: error mail is due (or already sent today)
+    return counts
+
+
+def build_status_lines(channels: list, state_channels: dict, threshold: int,
+                       show_all: bool = False) -> list:
+    """Status section of the mails, e.g.
+        Status (13 channels in total)
+              7 channels up to date
+              3 channels are failing 1 to 9 times in a row
+              2 channels are failing 10 times or more in a row
+              1 channel without baseline because of errors
+    The failing lines appear only if at least one of them is not 0, the
+    'without baseline' and 'not checked yet' lines only if not 0.
+    show_all=True (used by --status): all lines, also those with 0,
+    except 'not checked yet' (only if not 0)."""
+    counts = compute_status_counts(channels, state_channels, threshold)
+    indent = " " * 5
+    width = len(str(len(channels)))  # numbers right-aligned below each other
+
+    def channels_text(count: int) -> str:
+        return plural(count, "channel", width)
+
+    def failing_line(count: int, times: str) -> str:
+        verb = "is" if count == 1 else "are"
+        return f"{indent}{channels_text(count)} {verb} failing {times} in a row"
+
+    lines = [f"Status ({plural(len(channels), 'channel')} in total)",
+             f"{indent}{channels_text(counts['up_to_date'])} up to date"]
+    if show_all or counts["below"] or counts["above"]:
+        if threshold > 1:
+            # With threshold 1 every failure is already above the limit
+            below_times = "1 time" if threshold == 2 else f"1 to {threshold - 1} times"
+            lines.append(failing_line(counts["below"], below_times))
+        above_times = f"{threshold} time{'' if threshold == 1 else 's'} or more"
+        lines.append(failing_line(counts["above"], above_times))
+    if show_all or counts["no_baseline"]:
+        lines.append(f"{indent}{channels_text(counts['no_baseline'])} without baseline because of errors")
+    if counts["not_checked"]:  # shown only if not 0, also with show_all
+        lines.append(f"{indent}{channels_text(counts['not_checked'])} not checked yet")
+    return lines
+
+
+def load_threshold(settings: dict) -> int:
+    return int(settings.get("error_alert", {}).get("min_consecutive_failures", DEFAULT_ERROR_THRESHOLD))
 
 
 # --------------------------------------------------------------------------
@@ -753,19 +884,33 @@ def write_atomic_text(path: Path, text: str) -> None:
     os.replace(tmp_path, path)
 
 
-def write_latest_files(channels: list, state: dict, overview: list) -> None:
-    """Write the overview as plain text and as Markdown (with clickable links)."""
-    updated = dt.datetime.now().strftime(TIMESTAMP_FORMAT)
-    # overview starts with the "Sorted by" line; the text file gets a separator below it
-    text_lines = [f"Last video per channel - updated {short_time(updated)}"] + overview[:1] + ["=" * 25] + overview[1:]
-    write_atomic_text(LATEST_FILE, "\n".join(text_lines))
-    write_atomic_text(LATEST_MD_FILE, build_latest_markdown(channels, state, updated))
-
-
-def mail_overview_section(overview: list) -> list:
+def build_latest_text(overview: list, title: str) -> list:
+    """Lines of last-video-per-channel.txt (also used as the list in every mail).
+    overview starts with the "Sorted by" line; a separator follows below it."""
     if not overview:
         return []
-    return ["", "-" * 40, "Last video per channel:"] + overview
+    return [title] + overview[:1] + ["=" * 25] + overview[1:]
+
+
+def latest_title_updated(updated: str) -> str:
+    return f"Last video per channel - updated {short_time(updated)}"
+
+
+def last_run_text() -> str:
+    """Time of the last run (modification time of the state file), e.g. '2026-10-28 02:51'."""
+    return (short_time(dt.datetime.fromtimestamp(STATE_FILE.stat().st_mtime).strftime(TIMESTAMP_FORMAT))
+            if STATE_FILE.exists() else "never")
+
+
+def latest_title_last_run() -> str:
+    """Title for lists built from the saved state (no feed access in this run)."""
+    return f"Last video per channel - state of last run {last_run_text()}"
+
+
+def write_latest_files(channels: list, state: dict, latest: list, updated: str) -> None:
+    """Write the overview as plain text and as Markdown (with clickable links)."""
+    write_atomic_text(LATEST_FILE, "\n".join(latest))
+    write_atomic_text(LATEST_MD_FILE, build_latest_markdown(channels, state, updated))
 
 
 # --------------------------------------------------------------------------
@@ -799,35 +944,27 @@ def run(args, log: RunLog) -> int:
 
     secrets = load_json(SECRETS_FILE, default={})
 
-    if args.test_mail:
-        log.mode = "test mail"
-        log.mail_triggered = True
-        try:
-            channels = [c for c in load_json(CHANNELS_FILE).get("channels", []) if c.get("enabled", True)]
-            overview = build_latest_overview(channels, load_json(STATE_FILE, default={"channels": {}}))
-        except Exception:
-            overview = []
-        try:
-            body = f"Test mail from UT-Livestream-Notification.\nSent: {dt.datetime.now().strftime(TIMESTAMP_FORMAT)}"
-            send_mail(settings, secrets, "Test mail", "\n".join([body] + mail_overview_section(overview)))
-            log.note("Test mail sent")
-            return 0
-        except Exception as exc:
-            log.note(f"ERROR: Test mail failed: {exc}")
-            return 1
+    threshold = load_threshold(settings)
 
     if args.send_list:
-        # Mail the last video per channel as known from the last run (no feed access)
+        # Mail the last video per channel as known from the last run (no feed access).
+        # Also serves as test mail: it is sent even if channels.json or the state
+        # are missing (e.g. right after setup), with a note instead of status and list.
         log.mode = "send list"
-        log.mail_triggered = True
-        channels = [c for c in load_json(CHANNELS_FILE).get("channels", []) if c.get("enabled", True)]
-        overview = build_latest_overview(channels, load_json(STATE_FILE, default={"channels": {}}))
-        last_run = (short_time(dt.datetime.fromtimestamp(STATE_FILE.stat().st_mtime).strftime(TIMESTAMP_FORMAT))
-                    if STATE_FILE.exists() else "never")
-        body = "\n".join([f"Last video per channel - state of last run {last_run}"]
-                         + overview[:1] + ["=" * 25] + overview[1:])
         try:
-            send_mail(settings, secrets, "Last video per channel", body)
+            channels = [c for c in load_json(CHANNELS_FILE).get("channels", []) if c.get("enabled", True)]
+            saved_state = load_json(STATE_FILE, default={"channels": {}})
+            status = build_status_lines(channels, saved_state.get("channels", {}), threshold)
+            latest = build_latest_text(build_latest_overview(channels, saved_state), latest_title_last_run())
+        except Exception as exc:
+            status, latest = [f"Status and last video list not available: {exc}"], []
+        details = ["The list was requested manually (--send-list).",
+                   f"State of last run: {last_run_text()}",
+                   f"Sent: {dt.datetime.now().strftime(TIMESTAMP_FORMAT)}",
+                   "No feed was checked for this mail."]
+        body = build_mail_body("this mail with the last video list was requested manually", status, details, latest)
+        try:
+            deliver_mail(settings, secrets, "Last video per channel", body, log)
             log.note("Last video list sent")
             return 0
         except Exception as exc:
@@ -846,7 +983,6 @@ def run(args, log: RunLog) -> int:
         return 0
 
     timeout = int(settings.get("http_timeout_seconds", 20))
-    threshold = int(settings.get("error_alert", {}).get("min_consecutive_failures", DEFAULT_ERROR_THRESHOLD))
     delay_window = int(settings.get("delay_note_window_minutes", DEFAULT_DELAY_NOTE_MINUTES))
     now = dt.datetime.now()
     now_str = now.strftime(TIMESTAMP_FORMAT)
@@ -940,22 +1076,23 @@ def run(args, log: RunLog) -> int:
                 progress(message)
 
     # --- Last video per channel: text file (also in dry runs) and mail section ---
-    overview = build_latest_overview(channels, state)
+    updated = dt.datetime.now().strftime(TIMESTAMP_FORMAT)
+    latest = build_latest_text(build_latest_overview(channels, state), latest_title_updated(updated))
     try:
-        write_latest_files(channels, state, overview)
+        write_latest_files(channels, state, latest, updated)
     except OSError as exc:
         log.note(f"ERROR: Writing {LATEST_FILE.name} / {LATEST_MD_FILE.name} failed: {exc}")
+    status = build_status_lines(channels, state["channels"], threshold)
 
     # --- Notification about new entries ---
     if new_by_channel:
-        subject, body = format_new_entries_mail(new_by_channel, overview)
+        subject, body = format_new_entries_mail(new_by_channel, status, latest)
         if args.dry_run:
             log.note(f"Mail not sent (dry run): {subject}")
             log.previews.append("----- MAIL (not sent, dry run) -----\nSubject: " + subject + "\n\n" + body + "\n-----")
         else:
-            log.mail_triggered = True
             try:
-                send_mail(settings, secrets, subject, body)
+                deliver_mail(settings, secrets, subject, body, log)
                 log.note(f"Mail sent: {subject}")
                 for url, ids in pending_updates.items():
                     ch_state = state["channels"][url]
@@ -972,14 +1109,13 @@ def run(args, log: RunLog) -> int:
     ]
     today = dt.date.today().isoformat()
     if failing and state.get("last_error_mail_date") != today:
-        subject, body = format_error_mail(failing, threshold, overview)
+        subject, body = format_error_mail(failing, threshold, status, latest)
         if args.dry_run:
             log.note(f"Error mail not sent (dry run): {len(failing)} failing channel(s)")
             log.previews.append("----- ERROR MAIL (not sent, dry run) -----\nSubject: " + subject + "\n\n" + body + "\n-----")
         else:
-            log.mail_triggered = True
             try:
-                send_mail(settings, secrets, subject, body)
+                deliver_mail(settings, secrets, subject, body, log)
                 state["last_error_mail_date"] = today
                 log.note(f"Error mail sent: {len(failing)} failing channel(s)")
             except Exception as exc:
@@ -997,48 +1133,17 @@ def run(args, log: RunLog) -> int:
 # --------------------------------------------------------------------------
 def show_status() -> int:
     try:
-        threshold = int(load_json(SETTINGS_FILE).get("error_alert", {})
-                        .get("min_consecutive_failures", DEFAULT_ERROR_THRESHOLD))
+        threshold = load_threshold(load_json(SETTINGS_FILE))
     except Exception:
         threshold = DEFAULT_ERROR_THRESHOLD
     channels = [c for c in load_json(CHANNELS_FILE).get("channels", []) if c.get("enabled", True)]
     state = load_json(STATE_FILE, default={"channels": {}}).get("channels", {})
 
-    no_baseline = not_checked = below = above = up_to_date = 0
-    for channel_cfg in channels:
-        ch_state = state.get(channel_cfg["url"]) or {}
-        failures = ch_state.get("consecutive_failures", 0)
-        if not ch_state.get("initialized"):
-            if failures > 0:
-                no_baseline += 1
-            else:
-                not_checked += 1
-        elif failures == 0:
-            up_to_date += 1
-        elif failures < threshold:
-            below += 1   # error mail not due yet
-        else:
-            above += 1   # threshold reached: error mail is due (or already sent today)
-
     last_run = (dt.datetime.fromtimestamp(STATE_FILE.stat().st_mtime).strftime(TIMESTAMP_FORMAT)
                 if STATE_FILE.exists() else "never")
-    g, c = RunLog.INDENT_GROUP, RunLog.INDENT_CHANNEL
-    lines = [
-        f"Outage status (last run: {last_run})",
-        f"{g}{len(channels)} channel(s) configured",
-        f"{g}of which:",
-        f"{c}{no_baseline} without baseline because of errors",
-    ]
-    if threshold > 1:
-        # With threshold 1 every failure is already above the limit
-        below_range = "#1" if threshold == 2 else f"#1 to #{threshold - 1}"
-        lines.append(f"{c}{below} with baseline, failure {below_range}")
-    lines += [
-        f"{c}{above} with baseline, failure #{threshold} or higher (error mail)",
-        f"{c}{up_to_date} up to date",
-    ]
-    if not_checked:
-        lines.append(f"{c}{not_checked} not checked yet")
+    # Same wording as the status section of the mails, but always all lines
+    # (except 'not checked yet', shown only if not 0)
+    lines = [f"Last run: {last_run}"] + build_status_lines(channels, state, threshold, show_all=True)
     print("\n".join(lines))
     return 0
 
@@ -1090,10 +1195,13 @@ def wait_before_closing(seconds: int) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="YouTube livestream change notifier")
+    parser = argparse.ArgumentParser(description="YouTube livestream change notifier. "
+                                     "Without option: normal run (check feeds, mail on new entries).")
     parser.add_argument("--dry-run", action="store_true", help="check only, send no mail, keep state unchanged")
-    parser.add_argument("--test-mail", action="store_true", help="send a test mail and exit")
-    parser.add_argument("--send-list", action="store_true", help="send the last video list by e-mail and exit")
+    parser.add_argument("--send-list", action="store_true",
+                        help="test mail with the last video list (state of the last run, no feed access)")
+    # Former option, kept as hidden alias of --send-list
+    parser.add_argument("--test-mail", dest="send_list", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--reset", action="store_true", help="forget known videos (new baseline on next run)")
     parser.add_argument("--status", action="store_true", help="show an overview of feed errors per channel")
     parser.add_argument("--dev-window", action="store_true", help=argparse.SUPPRESS)  # set by dev mode

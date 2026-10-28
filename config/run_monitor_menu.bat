@@ -11,15 +11,16 @@ echo ============================================
 echo   UT-Livestream-Notification - Start menu
 echo ============================================
 echo.
-echo   1  Normal run           (check feeds, mail on new entries)
-echo   2  Dry run              (check only, no mail, state unchanged)
-echo   3  Send last video list (mail with the newest video per channel)
-echo   4  Reset                (forget known videos, new baseline)
-echo   5  Show log             (logs\log-last-3-days.txt)
-echo   6  Outage status        (overview of feed errors per channel)
+echo   1  Normal run                     (check feeds, mail on new entries)
+echo   2  Dry run                        (check only, no mail, state unchanged)
+echo   3  Test mail with last video list (state of the last run, no feed access)
+echo   4  Reset                          (forget known videos, new baseline)
+echo   5  Show log                       (logs\log-last-3-days.txt)
+echo   6  Outage status                  (overview of feed errors per channel)
+echo   7  Show options                   (all options of ut_livestream_monitor.py)
 echo   0  Exit
 echo.
-choice /c 1234560 /n /m "Select [1-6, 0]: "
+choice /c 12345670 /n /m "Select [1-7, 0]: "
 set "selection=%ERRORLEVEL%"
 
 if "%selection%"=="1" set "args="
@@ -28,7 +29,8 @@ if "%selection%"=="3" set "args=--send-list"
 if "%selection%"=="4" goto confirm_reset
 if "%selection%"=="5" goto show_log
 if "%selection%"=="6" set "args=--status"
-if "%selection%"=="7" goto end
+if "%selection%"=="7" set "args=--help"
+if "%selection%"=="8" goto end
 goto run
 
 :confirm_reset
