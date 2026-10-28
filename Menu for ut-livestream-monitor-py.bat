@@ -1,9 +1,9 @@
 @echo off
 REM Interactive start menu for the monitor (development phase).
-REM Asks which mode to run, then starts ut_livestream_monitor.py accordingly.
+REM Asks which mode to run, then starts ut-livestream-monitor.py accordingly.
 setlocal
-REM This file lives in the config folder: switch to the project root (parent folder).
-cd /d "%~dp0.."
+REM This file lives in the project root: switch to its folder.
+cd /d "%~dp0"
 
 :menu
 cls
@@ -17,7 +17,7 @@ echo   3  Test mail with last video list (state of the last run, no feed access)
 echo   4  Reset                          (forget known videos, new baseline)
 echo   5  Show log                       (logs\log-last-3-days.txt)
 echo   6  Outage status                  (overview of feed errors per channel)
-echo   7  Show options                   (all options of ut_livestream_monitor.py)
+echo   7  Show options                   (all options of ut-livestream-monitor.py)
 echo   0  Exit
 echo.
 choice /c 12345670 /n /m "Select [1-7, 0]: "
@@ -53,9 +53,9 @@ goto menu
 
 :run
 echo.
-echo Running: python ut_livestream_monitor.py %args%
+echo Running: python ut-livestream-monitor.py %args%
 echo --------------------------------------------
-python ut_livestream_monitor.py %args%
+python ut-livestream-monitor.py %args%
 echo --------------------------------------------
 echo Exit code: %ERRORLEVEL%
 echo.

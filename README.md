@@ -18,17 +18,16 @@ No additional packages required - just the standard library of Python 3.8+.
 
 | Path | Purpose |
 |---|---|
-| `ut_livestream_monitor.py`        | The Python script.                                           |
+| `ut-livestream-monitor.py` | The Python script. |
+| `Menu for ut-livestream-monitor-py.bat` | Manual start via a selection menu (useful for testing parameter settings). |
 | `install_task.ps1` | Registers the Windows scheduled task. |
-| `config/run_monitor.bat` | Manual start with parameters (useful for testing parameter settings). |
-| `config/run_monitor_menu.bat` | Manual start via a selection menu (ditto). |
 | `config/*.example.json` | Templates for the three configuration files below |
 | `config/channels.json` | Channels to monitor (edit locally, not in Git/GitHub). |
 | `config/settings.json` | Mail addresses, SMTP server, thresholds (not in Git/GitHub). |
 | `config/secrets.json` | Gmail app password (confidential, not in Git/GitHub). |
 | `state/state.json` | Known video IDs and error counters (maintained by the Python script; hands off) |
 | `logs/log-last-3-days.txt` | Run log, newest run on top, older lines are deleted automatically after 3 days (adjustable with `log_retention_days`). |
-| `logs/mail-log-last-16-days.txt` | Mail log: only runs that sent (or tried to send) a mail, newest run on top, kept for 16 days (adjustable with `mail_log_retention_days`). |
+| `logs/mail-log-last-16-days.txt` | Mail log: only runs that sent (or tried to send) a mail, with the mail(s) verbatim, newest run on top, kept for 16 days (adjustable with `mail_log_retention_days`). |
 | `logs/last-video-per-channel.txt` | Newest video of every channel, listed with title, link, publication and detection time. Newest publication on top. Updated on every run. |
 | `logs/last-video-per-channel.md` | The same overview as a Markdown list with clickable links. |
 
@@ -64,33 +63,37 @@ No additional packages required - just the standard library of Python 3.8+.
 
 The manual start is typically used for testing (especially when new parameter settings are to be checked). For continuous operation, see chapter [Setting up automatic operation](#setting-up-automatic-operation).
 
-For the manual start, there is a batch file with these parameters:
+For the manual start, double-click `Menu for ut-livestream-monitor-py.bat`. The menu asks which mode to run:
 
 ```
-config\run_monitor.bat              normal run
-config\run_monitor.bat --dry-run    check only, no mail, state unchanged
-config\run_monitor.bat --test-mail  send a test mail
-config\run_monitor.bat --send-list  send the list of the newest videos by mail
-config\run_monitor.bat --reset      forget known videos -> new baseline
-config\run_monitor.bat --status     outage status: overview of feed errors per channel
+1  Normal run                     (check feeds, mail on new entries)
+2  Dry run                        (check only, no mail, state unchanged)
+3  Test mail with last video list (state of the last run, no feed access)
+4  Reset                          (forget known videos, new baseline)
+5  Show log                       (logs\log-last-3-days.txt)
+6  Outage status                  (overview of feed errors per channel)
+7  Show options                   (all options of ut-livestream-monitor.py)
+0  Exit
 ```
 
-Or directly: `python ut_livestream_monitor.py [option]`
+Or directly in the console: `python ut-livestream-monitor.py [--dry-run | --send-list | --reset | --status | --help]`
 
-Alternatively, double-click `config\run_monitor_menu.bat`: the menu asks which
-mode to run (see above). In addition, an outage status can be shown, which is determined from the saved state of the last run (so there is no feed access). This status looks as follows:
+`--send-list` also serves as test mail: it is sent even if `channels.json` or the saved state are still missing. The former option `--test-mail` still works as an alias of `--send-list`.
+
+With menu item 6 (`--status`), an outage status is shown, which is determined from the saved state of the last run (so there is no feed access). This status looks as follows:
 
 ```
-Outage status (last run: 2026-10-26 05:27:49)
-   12 channel(s) configured
-   of which:
-      3 without baseline because of errors
-      9 with baseline, failure #1 to #9
-      0 with baseline, failure #10 or higher (error mail)
-      0 up to date
+Last run: 2026-10-26 05:27:49
+Status (12 channels in total)
+      0 channels up to date
+      9 channels are failing 1 to 9 times in a row
+      0 channels are failing 10 times or more in a row
+      3 channels without baseline because of errors
 ```
 
-The limit (#10) can be set with the parameter `min_consecutive_failures`. From this limit on, the error mail is sent. Channels that have never been checked are listed as "not checked yet".
+For the two lines "channels are failing" (channels currently not reachable), the boundary (in this example up to 9 and 10 or more) depends on the parameter `min_consecutive_failures` (set to 10 in this example). From this limit on, the error mail is sent.
+
+One more line is shown only if it is not zero: channels that have never been checked are listed as "not checked yet" (e.g. a channel newly added to `channels.json` before its first run, or after `--reset`).
 
 <br>
 
@@ -139,16 +142,44 @@ An entry counts as **new** if the script does not know its video ID yet.
 - **By email**, and only if something new was found: one combined mail per run
   for all channels with new entries, e.g. subject
   `[UT-Livestream] 2 new entries: Example Alpha, Example Bravo`.
-  Content: title, link and publication time per entry; at the end the list
-  "Last video per channel".
 - **Error mail** for recurring errors, at most one per calendar day (see below).
 - Without new entries, no mail is sent.
+
+Every mail (notification, error mail, test mail with last video list) has the same layout:
+
+```
+This mail informs you:
+2 new entries
+
+Status (5 channels in total)
+     3 channels up to date
+     1 channel is failing 1 to 9 times in a row
+     0 channels are failing 10 times or more in a row
+     1 channel without baseline because of errors
+
+----------------------------------------
+<information that triggered the mail, e.g. title, link and publication time per new entry>
+
+----------------------------------------
+<list "Last video per channel", same text as logs/last-video-per-channel.txt>
+```
+
+Line "This mail informs you": possible triggers of a mail are:
+
+- `1 new entry`
+- `1 new entry (possibly delayed)` if the feed was disturbed before.
+- `1 source failed at least 10 times in a row`
+- `this mail with the last video list was requested manually`
+
+Manually triggered mails can be sent e.g. via the batch file.
+
+In the status, only lines that are not zero are shown.
 
 <br>
 
 ### Logging
 
-The result of every run is written to the log (`logs/log-last-3-days.txt`) and to the overview `logs/last-video-per-channel.txt` / `.md`. Runs that sent (or tried to send) a mail are additionally written to the mail log (`logs/mail-log-last-16-days.txt`).
+The result of every run is written to the log (`logs/log-last-3-days.txt`) and to the overview `logs/last-video-per-channel.txt` / `.md`. Runs that sent (or tried to send) a mail are additionally written to the mail log (`logs/mail-log-last-16-days.txt`): the run block followed by every mail of this run verbatim (subject and text, indented, between `----- Mail (sent) -----` or `----- Mail (NOT sent: <error>) -----` and `----- End of mail -----`).
 
 <br>
 
@@ -199,50 +230,22 @@ The result of every run is written to the log (`logs/log-last-3-days.txt`) and t
 
 **Overlapping runs**
 - A lock file (`state/monitor.lock`) prevents runs from overlapping. A run that finds the lock file of an active run ends immediately and logs "Run skipped: previous run still active". The lock file contains the process ID (PID) and the start time of the run.
-  If that process is no longer running (e.g. because the window was closed during a run), the lock file is considered stale and is replaced immediately ("Stale lock removed" in the log). A process that was started after the lock file (reused PID) does not count. If the check is not possible,
-  a lock file older than 10 minutes is considered stale.
+- A lock file older than 10 minutes is considered stale.
 
 **Last video per channel**
-- On every run (also dry run), `logs/last-video-per-channel.txt` lists the newest video of every channel: title, link, publication time (YouTube) and the time at which the script first detected it. The list is sorted by publication date, newest first; channels without a known video are at the end. The sort criterion is stated below the title line. Behind each channel name, the monitored feed is shown: `[only live streams]`, `[only videos]`, `[only shorts]` or `[all uploads]`. Channels with a failing feed are marked. The same overview is saved as a Markdown list with clickable links (`logs/last-video-per-channel.md`) and is added at the end of every mail (notification, error mail and test mail). With `--send-list` (menu item 3), the list is sent by mail on demand, with the state of the last run (no feed access).
+- On every run (also dry run), `logs/last-video-per-channel.txt` lists the newest video of every channel.
 
 <br>
 
 ### Terminal output
 
-**When?** Only if the script runs in a terminal: start via `config\run_monitor.bat`,
-`config\run_monitor_menu.bat`, `python ut_livestream_monitor.py` or, for scheduled runs,
-in [dev mode](#dev-mode). Normal scheduled runs (`pythonw.exe`) show nothing.
+Output in the terminal appears only if
 
-**What?**
-1. *Immediately, during the run*:
-   - one line per channel whose check takes longer than 3 seconds, e.g.
-     `Channel Example Bravo checked: error 404 (Not Found) - 5.4 s`
-   - the message "Outage suspected ..." if an outage is suspected.
+- the script was started via `Menu for ut-livestream-monitor-py.bat`,
+- in the console with `python ut-livestream-monitor.py` or
+- for scheduled runs in [dev mode](#dev-mode).
 
-   These immediate lines appear only in the terminal, not in the log
-   ("Outage suspected" is also included in the block).
-2. *At the end*: the same block that is also written on top of the log.
-
-Example (first line = immediate line, followed by the block):
-
-```
-Channel Example Bravo checked: error 404 (Not Found) - 5.4 s
-2026-10-27 09:15:02
-   Run: 3 channel(s)
-   ERROR: 1 channel(s)
-      Example Bravo:
-         HTTPError: HTTP Error 404: Not Found (failure #2)
-   New entry: 1 channel(s)
-      Example Alpha:
-         'Some title' (abc123xyz00)
-   No change: 1 channel(s)
-      Example Charlie
-   Mail sent: 1 new entry: Example Alpha
-   Run finished (2026-10-27 09:15:09)
-```
-
-3. *Only with `--dry-run`*: after the block, the preview of the mail that would have been sent.
-4. *Only with `--status`*: the outage status overview (see [Manual start](#manual-start)).
+Normal scheduled runs (`pythonw.exe`) show nothing.
 
 <br>
 

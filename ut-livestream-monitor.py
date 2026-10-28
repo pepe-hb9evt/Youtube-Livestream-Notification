@@ -12,12 +12,12 @@ one error e-mail per day.
 Only the Python standard library is used - no extra packages required.
 
 Usage:
-    python ut_livestream_monitor.py               normal run
-    python ut_livestream_monitor.py --dry-run     check feeds, print result, send nothing, keep state unchanged
-    python ut_livestream_monitor.py --send-list   send the last video list (state of the last run) by e-mail,
+    python ut-livestream-monitor.py               normal run
+    python ut-livestream-monitor.py --dry-run     check feeds, print result, send nothing, keep state unchanged
+    python ut-livestream-monitor.py --send-list   send the last video list (state of the last run) by e-mail,
                                                   also usable as test mail (--test-mail is an alias)
-    python ut_livestream_monitor.py --reset       forget known videos (next run re-creates the baseline)
-    python ut_livestream_monitor.py --status      show an overview of feed errors per channel
+    python ut-livestream-monitor.py --reset       forget known videos (next run re-creates the baseline)
+    python ut-livestream-monitor.py --status      show an overview of feed errors per channel
 
 License:
     MIT

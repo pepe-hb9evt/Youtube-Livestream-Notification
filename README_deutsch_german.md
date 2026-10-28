@@ -22,17 +22,16 @@ Keine zusätzlichen Pakete nötig - nur die Standardbibliothek von Python 3.8+.
 
 | Pfad | Zweck |
 |---|---|
-| `ut_livestream_monitor.py`        | Das Python-Skript.                                           |
+| `ut-livestream-monitor.py` | Das Python-Skript. |
+| `Menu for ut-livestream-monitor-py.bat` | Manueller Start über ein Auswahlmenü (nützlich zum Testen von Parameter-Einstellungen). |
 | `install_task.ps1` | Richtet die geplante Windows-Aufgabe ein. |
-| `config/run_monitor.bat` | Manueller Start mit Parametern (nützlich zum Testen von Parameter-Einstellungen). |
-| `config/run_monitor_menu.bat` | Manueller Start über ein Auswahlmenü (dito). |
 | `config/*.example.json` | Vorlagen für die drei folgenden Konfigurationsdateien |
 | `config/channels.json` | Zu überwachende Kanäle (lokal bearbeiten, nicht in Git/GitHub). |
 | `config/settings.json` | Mail-Adressen, SMTP-Server, Schwellwerte (nicht in Git/GitHub). |
 | `config/secrets.json` | Gmail-App-Passwort (vertraulich, nicht in Git/GitHub). |
 | `state/state.json` | Bekannte Video-IDs und Fehlerzähler (wird vom Python-Skript bearbeitet; Finger weg) |
 | `logs/log-last-3-days.txt` | Protokoll der Läufe, neuester Lauf zuoberst, ältere Zeilen werden automatisch nach 3 Tagen gelöscht (einstellbar mit `log_retention_days`). |
-| `logs/mail-log-last-16-days.txt` | Mail-Protokoll: nur Läufe, die eine Mail verschickt (oder es versucht) haben, neuester Lauf zuoberst, 16 Tage aufbewahrt (einstellbar mit `mail_log_retention_days`). |
+| `logs/mail-log-last-16-days.txt` | Mail-Protokoll: nur Läufe, die eine Mail verschickt (oder es versucht) haben, mit der/den Mail(s) im Wortlaut, neuester Lauf zuoberst, 16 Tage aufbewahrt (einstellbar mit `mail_log_retention_days`). |
 | `logs/last-video-per-channel.txt` | Neuestes Video jedes Kanals aufgelistet mit Titel, Link, Veröffentlichung und Meldezeit. Neueste Veröffentlichung ist zuoberst. Wird bei jedem Lauf nachgeführt. |
 | `logs/last-video-per-channel.md` | Dieselbe Übersicht als Markdown-Liste mit anklickbaren Links. |
 
@@ -68,33 +67,37 @@ Keine zusätzlichen Pakete nötig - nur die Standardbibliothek von Python 3.8+.
 
 Der manuelle Start wird typischerweise zum Testen verwendet (insbesondere wenn neue Parameter-Einstellungen geprüft werden sollen). Für den ständigen Betrieb siehe Kapitel [Automatischer Betrieb einrichten](#automatischer-betrieb-einrichten).
 
-Für den manuellen Start gibt es eine Batch-Datei mit diesen Parametern:
+Für den manuellen Start `Menu for ut-livestream-monitor-py.bat` per Doppelklick starten. Das Menü fragt, welche Variante ausgeführt werden soll:
 
 ```
-config\run_monitor.bat              normaler Lauf
-config\run_monitor.bat --dry-run    nur prüfen, keine Mail, Stand unverändert
-config\run_monitor.bat --test-mail  Testmail verschicken
-config\run_monitor.bat --send-list  Liste der neuesten Videos per Mail verschicken
-config\run_monitor.bat --reset      bekannte Videos vergessen -> neuer Ausgangsstand
-config\run_monitor.bat --status     Störungsstatus: Überblick über Feed-Fehler pro Kanal
+1  Normal run                     (Feeds prüfen, Mail bei neuen Einträgen)
+2  Dry run                        (nur prüfen, keine Mail, Stand unverändert)
+3  Test mail with last video list (Stand des letzten Laufs, keine Feed-Abfrage)
+4  Reset                          (bekannte Videos vergessen, neuer Ausgangsstand)
+5  Show log                       (logs\log-last-3-days.txt)
+6  Outage status                  (Überblick über Feed-Fehler pro Kanal)
+7  Show options                   (alle Optionen von ut-livestream-monitor.py)
+0  Exit
 ```
 
-Oder direkt: `python ut_livestream_monitor.py [Option]`
+Oder direkt in der Konsole: `python ut-livestream-monitor.py [--dry-run | --send-list | --reset | --status | --help]`
 
-Alternativ `config\run_monitor_menu.bat` per Doppelklick starten: Das Menü fragt, welche
-Variante ausgeführt werden soll (siehe oben). Zusätzlich kann ein Störungsstatus angezeigt werden, der aus dem gespeicherten Stand des letzten Laufs ermittelt wird (es erfolgt also keine Feed-Abfrage). Dieser Status sieht wie folgt aus:
+`--send-list` dient auch als Testmail: Sie wird auch dann verschickt, wenn `channels.json` oder der gespeicherte Stand noch fehlen. Die frühere Option `--test-mail` funktioniert weiterhin als Alias von `--send-list`.
+
+Mit Menüpunkt 6 (`--status`) wird ein Störungsstatus angezeigt, der aus dem gespeicherten Stand des letzten Laufs ermittelt wird (es erfolgt also keine Feed-Abfrage). Dieser Status sieht wie folgt aus:
 
 ```
-Outage status (last run: 2026-10-26 05:27:49)
-   12 channel(s) configured
-   of which:
-      3 without baseline because of errors
-      9 with baseline, failure #1 to #9
-      0 with baseline, failure #10 or higher (error mail)
-      0 up to date
+Last run: 2026-10-26 05:27:49
+Status (12 channels in total)
+      0 channels up to date
+      9 channels are failing 1 to 9 times in a row
+      0 channels are failing 10 times or more in a row
+      3 channels without baseline because of errors
 ```
 
-Die Grenze (#10) ist im Parameter `min_consecutive_failures` einstellbar. Ab dieser Grenze wird die Fehler-Mail verschickt. Kanäle, die noch nie geprüft wurden, erscheinen als "not checked yet".
+Bei den zwei Zeilen "channels are failing" (Kanäle sind z.Zt. nicht abrufbar) ist die Abgrenzung (hier im Beispiel bis 9 bzw. 10 und mehr) abhängig vom Parameter `min_consecutive_failures` (Hier im Beispiel auf 10 gesetzt). Ab dieser Grenze wird die Fehler-Mail verschickt.
+
+Eine weitere Zeile wird nur dargestellt, wenn sie nicht null ist : Kanäle, die noch nie geprüft wurden, erscheinen als "not checked yet" (z. B. ein neu in `channels.json` eingetragener Kanal vor seinem ersten Lauf oder nach `--reset`).
 
 <br>
 
@@ -143,16 +146,44 @@ Als **neu** gilt ein Eintrag, dessen Video-ID das Skript noch nicht kennt.
 - **Per E-Mail**, und nur dann, wenn etwas Neues gefunden wurde: eine Sammelmail pro Lauf
   für alle Kanäle mit neuen Einträgen, z. B. Betreff
   `[UT-Livestream] 2 new entries: Example Alpha, Example Bravo`.
-  Inhalt: pro Eintrag Titel, Link und Veröffentlichungszeit; am Schluss die Liste
-  „Neuestes Video pro Kanal“.
 - **Fehler-Mail** bei wiederkehrenden Fehlern, höchstens eine pro Kalendertag (siehe unten).
 - Ohne neue Einträge wird keine Mail verschickt.
+
+Jede Mail (Benachrichtigung, Fehler-Mail, Testmail mit Video-Liste) hat denselben Aufbau:
+
+```
+This mail informs you:
+2 new entries
+
+Status (5 channels in total)
+     3 channels up to date
+     1 channel is failing 1 to 9 times in a row
+     0 channels are failing 10 times or more in a row
+     1 channel without baseline because of errors
+
+----------------------------------------
+<Information, die die Mail ausgelöst hat, z. B. pro neuem Eintrag Titel, Link und Veröffentlichungszeit>
+
+----------------------------------------
+<Liste „Last video per channel“, gleicher Text wie logs/last-video-per-channel.txt>
+```
+
+Zeile "This mail informs you": Auslöser eines Mails können sein:
+
+- `1 new entry`
+- `1 new entry (possibly delayed)`wenn der feed zuvor gestört war.
+- `1 source failed at least 10 times in a row`
+- `this mail with the last video list was requested manually`
+
+Manuell ausgelöste Mails können z.B. über die Batch-Datei erfolgen.
+
+Beim Status werden nur Zeilen ausgewiesen, die nicht null sind.
 
 <br>
 
 ### Protokollierung
 
-Das Ergebnis jedes Laufs steht im Log (`logs/log-last-3-days.txt`) und in der Übersicht `logs/last-video-per-channel.txt` / `.md`. Läufe, die eine Mail verschickt (oder es versucht) haben, stehen zusätzlich im Mail-Protokoll (`logs/mail-log-last-16-days.txt`).
+Das Ergebnis jedes Laufs steht im Log (`logs/log-last-3-days.txt`) und in der Übersicht `logs/last-video-per-channel.txt` / `.md`. Läufe, die eine Mail verschickt (oder es versucht) haben, stehen zusätzlich im Mail-Protokoll (`logs/mail-log-last-16-days.txt`): der Lauf-Block, gefolgt von jeder Mail dieses Laufs im Wortlaut (Betreff und Text, eingerückt, zwischen `----- Mail (sent) -----` bzw. `----- Mail (NOT sent: <Fehler>) -----` und `----- End of mail -----`).
 
 <br>
 
@@ -203,50 +234,22 @@ Das Ergebnis jedes Laufs steht im Log (`logs/log-last-3-days.txt`) und in der Ü
 
 **Überlappende Läufe**
 - Eine Lock-Datei (`state/monitor.lock`) verhindert, dass sich Läufe überlappen. Ein Lauf, der die Lock-Datei eines aktiven Laufs vorfindet, beendet sich sofort und protokolliert "Run skipped: previous run still active". Die Lock-Datei enthält die Prozessnummer (PID) und die Startzeit des Laufs.
-  Läuft dieser Prozess nicht mehr (z. B. weil das Fenster während eines Laufs geschlossen wurde), gilt die Lock-Datei als verwaist und wird sofort ersetzt ("Stale lock removed" im Log). Ein Prozess, der nach der Lock-Datei gestartet wurde (wiederverwendete PID), zählt nicht. Ist die Prüfung nicht möglich,
-  gilt eine Lock-Datei, die älter als 10 Minuten ist, als verwaist.
+- Eine Lock-Datei, die älter als 10 Minuten ist, gilt als verwaist.
 
 **Neuestes Video pro Kanal**
-- Bei jedem Lauf (auch Dry Run) listet `logs/last-video-per-channel.txt` das neueste Video jedes Kanals auf: Titel, Link, Veröffentlichungszeit (YouTube) und den Zeitpunkt, zu dem das Skript es erstmals erkannt hat. Die Liste ist nach Veröffentlichungsdatum sortiert, die neueste zuoberst; Kanäle ohne bekanntes Video stehen am Schluss. Das Sortierkriterium steht unterhalb der Titelzeile. Hinter jedem Kanalnamen steht, welcher Feed überwacht wird: `[only live streams]`, `[only videos]`, `[only shorts]` oder `[all uploads]`. Kanäle mit gestörtem Feed werden gekennzeichnet. Dieselbe Übersicht wird als Markdown-Liste mit anklickbaren Links gespeichert (`logs/last-video-per-channel.md`) und steht am Ende jeder Mail (Benachrichtigung, Fehler-Mail und Testmail). Mit `--send-list` (Menüpunkt 3) wird die Liste bei Bedarf per Mail verschickt, mit dem Stand des letzten Laufs (keine Feed-Abfrage).
+- Bei jedem Lauf (auch Dry Run) listet `logs/last-video-per-channel.txt` das neueste Video jedes Kanals auf.
 
 <br>
 
 ### Ausgabe im Terminal
 
-**Wann?** Nur wenn das Skript in einem Terminal läuft: Start über `config\run_monitor.bat`,
-`config\run_monitor_menu.bat`, `python ut_livestream_monitor.py` oder bei geplanten Läufen
-im [Dev-Modus](#dev-modus). Normale geplante Läufe (`pythonw.exe`) zeigen nichts an.
+Eine Ausgabe im Terminal erfolgt nur wenn
 
-**Was?**
-1. *Sofort, während des Laufs*:
-   - eine Zeile pro Kanal, dessen Prüfung länger als 3 Sekunden dauert, z. B.
-     `Channel Example Bravo checked: error 404 (Not Found) - 5.4 s`
-   - die Meldung "Outage suspected ..." bei vermuteter Störung.
+- das Skript über `Menu for ut-livestream-monitor-py.bat` gestartet wurde,
+- in der Konsole mit `python ut-livestream-monitor.py`oder
+- bei geplanten Läufen im [Dev-Modus](#dev-modus).
 
-   Diese Sofort-Zeilen erscheinen nur im Terminal, nicht im Log
-   ("Outage suspected" steht zusätzlich im Block).
-2. *Am Ende*: derselbe Block, der auch zuoberst ins Log geschrieben wird.
-
-Beispiel (erste Zeile = Sofort-Zeile, danach der Block):
-
-```
-Channel Example Bravo checked: error 404 (Not Found) - 5.4 s
-2026-10-27 09:15:02
-   Run: 3 channel(s)
-   ERROR: 1 channel(s)
-      Example Bravo:
-         HTTPError: HTTP Error 404: Not Found (failure #2)
-   New entry: 1 channel(s)
-      Example Alpha:
-         'Some title' (abc123xyz00)
-   No change: 1 channel(s)
-      Example Charlie
-   Mail sent: 1 new entry: Example Alpha
-   Run finished (2026-10-27 09:15:09)
-```
-
-3. *Nur bei `--dry-run`*: nach dem Block die Vorschau der Mail, die verschickt worden wäre.
-4. *Nur bei `--status`*: die Übersicht des Störungsstatus (siehe [Manueller Start](#manueller-start)).
+Normale geplante Läufe (`pythonw.exe`) zeigen nichts an.
 
 <br>
 

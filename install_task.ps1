@@ -9,7 +9,7 @@ param(
 )
 
 $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$script = Join-Path $projectDir "ut_livestream_monitor.py"
+$script = Join-Path $projectDir "ut-livestream-monitor.py"
 
 if ($Remove) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
