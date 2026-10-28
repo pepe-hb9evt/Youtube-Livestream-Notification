@@ -10,6 +10,8 @@ Ein Python-Skript, das die Livestreams deiner Lieblingskanäle auf YouTube über
 
 Statt Livestreams kann das Python-Skript auch die "Shorts" oder die Videos ("long-form videos") deiner bevorzugten YouTube-Kanäle überwachen.
 
+Die Überwachung von Livestreams, Shorts und Videos nutzt Feeds, die YouTube nicht offiziell dokumentiert und die vielleicht in Zukunft wegfallen könnten (siehe [Was wird geprüft?](#was-wird-geprüft)).
+
 Wiederkehrende Fehler lösen höchstens eine Fehler-E-Mail pro Tag aus.
 
 Keine zusätzlichen Pakete nötig - nur die Standardbibliothek von Python 3.8+.
@@ -66,7 +68,7 @@ Keine zusätzlichen Pakete nötig - nur die Standardbibliothek von Python 3.8+.
 
 Der manuelle Start wird typischerweise zum Testen verwendet (insbesondere wenn neue Parameter-Einstellungen geprüft werden sollen). Für den ständigen Betrieb siehe Kapitel [Automatischer Betrieb einrichten](#automatischer-betrieb-einrichten).
 
-Für den manuellen Start gibt eine Batch-Datei mit diesen Parametern:
+Für den manuellen Start gibt es eine Batch-Datei mit diesen Parametern:
 
 ```
 config\run_monitor.bat              normaler Lauf
@@ -124,10 +126,15 @@ Pro Kanal wird ein öffentlicher YouTube-RSS-Feed abgefragt. Welcher Feed geprü
 | `all` | alle Uploads des Kanals (Videos, Shorts, Livestreams) | `[all uploads]` |
 | `auto` | abgeleitet vom Ende der URL: `/streams` oder `/live` -> `streams`, `/videos` -> `longvideos`, `/shorts` -> `shorts`, sonst `all`. Gilt auch, wenn `feed_type` fehlt. | wie der abgeleitete Typ |
 
-Ein unbekannter `feed_type` wird als Fehler protokolliert. Die Feeds `streams`, `longvideos` und `shorts`
-sind Playlists, die YouTube nicht offiziell dokumentiert und die sich ändern können.
+Ein unbekannter `feed_type` wird als Fehler protokolliert.
 
 Als **neu** gilt ein Eintrag, dessen Video-ID das Skript noch nicht kennt.
+
+------
+
+**Achtung:** Die Feeds `streams`, `longvideos` und `shorts` sind Playlists, die YouTube nicht offiziell dokumentiert. YouTube kann sie jederzeit ändern oder abschalten; dann würden diese `feed_type` nicht mehr funktionieren. Einzig `all` nutzt den offiziellen Kanal-Feed.
+
+------
 
 <br>
 

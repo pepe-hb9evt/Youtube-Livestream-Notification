@@ -6,6 +6,8 @@ A Python script that monitors the live streams of your favorite YouTube channels
 
 Instead of live streams, the Python script can also monitor the "Shorts" or the videos ("long-form videos") of your favorite YouTube channels.
 
+Monitoring live streams, shorts and videos uses feeds that are not officially documented by YouTube and that might disappear in the future (see [What is checked?](#what-is-checked)).
+
 Recurring errors trigger at most one error email per day.
 
 No additional packages required - just the standard library of Python 3.8+.
@@ -120,10 +122,15 @@ For each channel, a public YouTube RSS feed is queried. Which feed is checked is
 | `all` | every upload of the channel (videos, shorts, live streams) | `[all uploads]` |
 | `auto` | derived from the end of the URL: `/streams` or `/live` -> `streams`, `/videos` -> `longvideos`, `/shorts` -> `shorts`, otherwise `all`. Also applies if `feed_type` is missing. | like the derived type |
 
-An unknown `feed_type` is logged as an error. The feeds `streams`, `longvideos` and `shorts`
-are playlists that are not officially documented by YouTube and that may change.
+An unknown `feed_type` is logged as an error.
 
 An entry counts as **new** if the script does not know its video ID yet.
+
+------
+
+**Attention:** The feeds `streams`, `longvideos` and `shorts` are playlists that are not officially documented by YouTube. YouTube can change or switch them off at any time; these `feed_type` values would then no longer work. Only `all` uses the official channel feed.
+
+------
 
 <br>
 
