@@ -14,7 +14,11 @@
 !/ut-livestream-monitor.py
 !/Menu for ut-livestream-monitor-py.bat
 !/install_task.ps1
-!/Research_How-to-dedect-status-of-Youtube-livestreams.md
+
+# docs folder: background documents (Markdown)
+!/docs/
+/docs/*
+!/docs/*.md
 
 # config folder: only the example files
 !/config/
