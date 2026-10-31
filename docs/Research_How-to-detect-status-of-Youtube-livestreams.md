@@ -1,6 +1,6 @@
 # Detecting the State of YouTube Livestreams
 
-**Author: Claude A.I.**<br>
+**Written by: Claude A.I.**<br>
 **Date: 2026-10-31**
 
 <br>
