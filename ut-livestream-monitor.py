@@ -4,7 +4,8 @@
 YouTube-Livestream-Notification
 ===============================
 Observes your favorite YouTube channels (configured in config/channels.json)
-via their public RSS feeds and sends an e-mail ONLY when new entries appear.
+via their public RSS feeds and sends an e-mail ONLY when new entries appear
+or when an upcoming livestream starts.
 
 Recurring errors (e.g. feed unreachable several runs in a row) trigger at most
 one error e-mail per day.
@@ -134,7 +135,7 @@ class RunLog:
     INDENT_DETAIL = " " * 9
 
     # Output order of the channel groups
-    GROUP_ORDER = ["ERROR", "WARN", "Recovered", "New entry", "Baseline created", "No change"]
+    GROUP_ORDER = ["ERROR", "WARN", "Recovered", "New entry", "Livestream started", "Baseline created", "No change"]
 
     def __init__(self, log_file: Path, mail_log_file: Path, verbose: bool = True,
                  retention_days: int = 3, mail_retention_days: int = 16):
@@ -662,11 +663,11 @@ def to_local(value: str):
 
 
 def format_duration(seconds) -> str:
-    """Duration as h:mm, e.g. 9180 -> '2:33'. Below one minute -> '0:01'."""
+    """Duration in hours and minutes, e.g. 9180 -> '2h 33m'. Below one minute -> '0h 01m'."""
     minutes = round((seconds or 0) / 60)
     if minutes == 0 and seconds:
         minutes = 1
-    return f"{minutes // 60}:{minutes % 60:02d}"
+    return f"{minutes // 60}h {minutes % 60:02d}m"
 
 
 def day_time(moment: dt.datetime, now: dt.datetime) -> str:
@@ -828,19 +829,35 @@ def build_mail_body(trigger: str, status: list, details: list, latest: list) -> 
     return body + MAIL_GAP + "\n".join(MAIL_FOOTER)
 
 
-def format_new_entries_mail(new_by_channel: list, status: list, latest: list,
+def format_new_entries_mail(new_by_channel: list, started: list, status: list, latest: list,
                             now: dt.datetime, run_str: str) -> tuple:
     """new_by_channel: [(name, [entries], delay_note or None)],
+    started: [(name, video)] livestreams that changed from upcoming to live,
     status: see build_status_lines, latest: see build_latest_text"""
     total = sum(len(items) for _, items, _ in new_by_channel)
-    names = ", ".join(name for name, _, _ in new_by_channel)
-    entries_text = f"{total} new entr{'y' if total == 1 else 'ies'}"
-    subject = f"{entries_text}: {names}"
-    trigger = entries_text
+    texts, names = [], []
+    if total:
+        texts.append(f"{total} new entr{'y' if total == 1 else 'ies'}")
+        names += [name for name, _, _ in new_by_channel]
+    if started:
+        texts.append(f"{plural(len(started), 'livestream')} started")
+        names += [name for name, _ in started if name not in names]
+    trigger = ", ".join(texts)
+    subject = f"{trigger}: {', '.join(names)}"
     if any(note for _, _, note in new_by_channel):
         subject += " (possibly delayed)"
-        trigger += " (possibly delayed)"
-    lines = ["==== New entries ====", "", f"(Checked: {now:%Y-%m-%d %H:%M})", ""]
+        trigger = trigger.replace(texts[0], texts[0] + " (possibly delayed)", 1)
+    lines = []
+    if started:
+        lines += ["==== Livestreams started ====", "", f"(Checked: {now:%Y-%m-%d %H:%M})", ""]
+        for name, video in started:
+            lines += [name, f"  {video['title']}", f"  {video['link']}",
+                      f"  {describe_video(video, now, run_str)}", ""]
+    if not new_by_channel:
+        return subject, build_mail_body(trigger, status, lines, latest)
+    if lines:
+        lines = strip_blank_end(lines) + ["", ""]     # two blank lines between the chapters
+    lines += ["==== New entries ====", "", f"(Checked: {now:%Y-%m-%d %H:%M})", ""]
     for name, items, note in new_by_channel:
         lines.append(name)
         if note:
@@ -1323,6 +1340,22 @@ def video_needs_check(video: dict, now: dt.datetime) -> bool:
     return True     # not checked yet, live (end?) or unknown
 
 
+def collect_started_livestreams(channels: list, state: dict) -> list:
+    """[(channel name, video)] of livestreams that changed from upcoming to live and
+    were not mailed yet. A flag of a stream that is no longer live is dropped."""
+    started = []
+    for channel_cfg in channels:
+        ch_state = state["channels"].get(channel_cfg["url"]) or {}
+        for video in (ch_state.get("videos") or {}).values():
+            if not video.get("start_notify"):
+                continue
+            if (video.get("live") or {}).get("state") == LIVE_LIVE:
+                started.append((channel_cfg.get("name") or channel_cfg["url"], video))
+            else:
+                video.pop("start_notify", None)
+    return started
+
+
 def refresh_video_details(channels: list, state: dict, new_by_channel: list, api_key: str,
                           timeout: int, now: dt.datetime, now_str: str, log: RunLog) -> None:
     """Determine the livestream state of the feed videos of all channels.
@@ -1371,6 +1404,10 @@ def refresh_video_details(channels: list, state: dict, new_by_channel: list, api
 
     for video_id, info in results.items():
         name, videos, video = owner[video_id]
+        if (video.get("live") or {}).get("state") == LIVE_UPCOMING and info["state"] == LIVE_LIVE:
+            # Upcoming -> live: mail "livestream started" (flag stays until the mail was sent)
+            video["start_notify"] = True
+            log.add("Livestream started", name, f"'{video.get('title')}' ({video_id})")
         if info["state"] == LIVE_REMOVED:
             # Kept as long as the feed lists it, so it is not requested again
             log.add("WARN", name, f"video {video_id} deleted or private, not shown in the list")
@@ -1567,9 +1604,10 @@ def run(args, log: RunLog) -> int:
         log.note(f"ERROR: Writing {LATEST_FILE.name} / {LATEST_MD_FILE.name} failed: {exc}")
     status = build_status_lines(channels, state["channels"], threshold)
 
-    # --- Notification about new entries ---
-    if new_by_channel:
-        subject, body = format_new_entries_mail(new_by_channel, status, latest, now, now_str)
+    # --- Notification about new entries and started livestreams ---
+    started = collect_started_livestreams(channels, state)
+    if new_by_channel or started:
+        subject, body = format_new_entries_mail(new_by_channel, started, status, latest, now, now_str)
         if args.dry_run:
             log.note(f"Mail not sent (dry run): {subject}")
             log.previews.append("----- MAIL (not sent, dry run) -----\nSubject: " + subject + "\n\n" + body + "\n-----")
@@ -1580,8 +1618,10 @@ def run(args, log: RunLog) -> int:
                 for url, ids in pending_updates.items():
                     ch_state = state["channels"][url]
                     ch_state["known_video_ids"] = (ids + ch_state["known_video_ids"])[:MAX_KNOWN_IDS_PER_CHANNEL]
+                for _, video in started:
+                    video.pop("start_notify", None)
             except Exception as exc:
-                # IDs are NOT marked as known -> retried on next run
+                # IDs are NOT marked as known and start flags stay -> retried on next run
                 log.note(f"ERROR: Mail failed, will retry next run: {exc}")
 
     # --- Recurring error alert (max. once per day) ---

@@ -144,8 +144,10 @@ An entry counts as **new** if the script does not know its video ID yet.
 - **By email**, and only if something new was found: one combined mail per run
   for all channels with new entries, e.g. subject
   `[UT-Livestream] 2 new entries: Example Alpha, Example Bravo`.
+- **By email when an announced livestream starts** (change from "upcoming" to "live"), e.g. subject
+  `[UT-Livestream] 1 livestream started: Example Alpha`. If this coincides with new entries, one combined mail is sent (`1 new entry, 1 livestream started: …`) with the chapters `==== Livestreams started ====` and `==== New entries ====`.
 - **Error mail** for recurring errors, at most one per calendar day (see below).
-- Without new entries, no mail is sent.
+- Without new entries and without started livestreams, no mail is sent.
 
 Every mail (notification, error mail, test mail with last video list) has the same layout:
 
@@ -202,6 +204,7 @@ Line "This mail informs you": possible triggers of a mail are:
 
 - `1 new entry`
 - `1 new entry (possibly delayed)` if the feed was disturbed before.
+- `1 livestream started` (or `1 new entry, 1 livestream started`)
 - `1 source failed at least 10 times in a row`
 - `this mail with the last video list was requested manually`
 
@@ -211,14 +214,14 @@ In the status, only lines that are not zero are shown. If the status reports fai
 
 **Livestream details**
 
-For every video (new entries and list "Last video per channel") a line shows its state. Times in local time, duration as h:mm:
+For every video (new entries and list "Last video per channel") a line shows its state. Times in local time, duration in hours and minutes:
 
 | State | Line in the mail |
 |---|---|
 | Livestream upcoming | `Livestream upcoming, starts today at 20:00` (or `tomorrow at …`, `on 2026-11-02 at …`) |
 | Livestream live | `Livestream live since 18:59` |
-| Livestream ended | `Livestream ended at 02:31, duration 2:33` |
-| Normal video | `Video published 2026-10-28 23:15, duration 0:12` |
+| Livestream ended | `Livestream ended at 02:31, duration 2h 33m` |
+| Normal video | `Video published 2026-10-28 23:15, duration 0h 12m` |
 | State unknown | `Published: 2026-10-28 23:15` (time from the feed) |
 
 - If a point in time is not on the current day, the date is shown as well.

@@ -146,8 +146,10 @@ Als **neu** gilt ein Eintrag, dessen Video-ID das Skript noch nicht kennt.
 - **Per E-Mail**, und nur dann, wenn etwas Neues gefunden wurde: eine Sammelmail pro Lauf
   für alle Kanäle mit neuen Einträgen, z. B. Betreff
   `[UT-Livestream] 2 new entries: Example Alpha, Example Bravo`.
+- **Per E-Mail, wenn ein angekündigter Livestream startet** (Wechsel von „anstehend“ zu „läuft“), z. B. Betreff
+  `[UT-Livestream] 1 livestream started: Example Alpha`. Fällt das mit neuen Einträgen zusammen, kommt eine gemeinsame Mail (`1 new entry, 1 livestream started: …`) mit den Kapiteln `==== Livestreams started ====` und `==== New entries ====`.
 - **Fehler-Mail** bei wiederkehrenden Fehlern, höchstens eine pro Kalendertag (siehe unten).
-- Ohne neue Einträge wird keine Mail verschickt.
+- Ohne neue Einträge und ohne gestartete Livestreams wird keine Mail verschickt.
 
 Jede Mail (Benachrichtigung, Fehler-Mail, Testmail mit Video-Liste) hat denselben Aufbau:
 
@@ -204,6 +206,7 @@ Zeile "This mail informs you": Auslöser eines Mails können sein:
 
 - `1 new entry`
 - `1 new entry (possibly delayed)`wenn der feed zuvor gestört war.
+- `1 livestream started` (bzw. `1 new entry, 1 livestream started`)
 - `1 source failed at least 10 times in a row`
 - `this mail with the last video list was requested manually`
 
@@ -213,14 +216,14 @@ Beim Status werden nur Zeilen ausgewiesen, die nicht null sind. Meldet der Statu
 
 **Livestream-Angaben**
 
-Zu jedem Video (neue Einträge und Liste „Last video per channel“) steht eine Zeile mit seinem Zustand. Zeiten in Lokalzeit, Dauer als h:mm:
+Zu jedem Video (neue Einträge und Liste „Last video per channel“) steht eine Zeile mit seinem Zustand. Zeiten in Lokalzeit, Dauer in Stunden und Minuten:
 
 | Zustand | Zeile im Mail |
 |---|---|
 | Livestream anstehend | `Livestream upcoming, starts today at 20:00` (bzw. `tomorrow at …`, `on 2026-11-02 at …`) |
 | Livestream läuft | `Livestream live since 18:59` |
-| Livestream beendet | `Livestream ended at 02:31, duration 2:33` |
-| Normales Video | `Video published 2026-10-28 23:15, duration 0:12` |
+| Livestream beendet | `Livestream ended at 02:31, duration 2h 33m` |
+| Normales Video | `Video published 2026-10-28 23:15, duration 0h 12m` |
 | Zustand unbekannt | `Published: 2026-10-28 23:15` (Zeit aus dem Feed) |
 
 - Liegt ein Zeitpunkt nicht am aktuellen Tag, wird das Datum mit angezeigt.
