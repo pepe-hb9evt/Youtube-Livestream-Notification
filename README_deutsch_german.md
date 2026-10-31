@@ -155,6 +155,8 @@ Jede Mail (Benachrichtigung, Fehler-Mail, Testmail mit Video-Liste) hat denselbe
 This mail informs you:
 2 new entries
 
+All times in this mail in W. Europe Standard Time (UTC+1), the local time of the sending computer.
+
 
 Status (5 channels in total)
      3 channels up to date

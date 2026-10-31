@@ -153,6 +153,8 @@ Every mail (notification, error mail, test mail with last video list) has the sa
 This mail informs you:
 2 new entries
 
+All times in this mail in W. Europe Standard Time (UTC+1), the local time of the sending computer.
+
 
 Status (5 channels in total)
      3 channels up to date

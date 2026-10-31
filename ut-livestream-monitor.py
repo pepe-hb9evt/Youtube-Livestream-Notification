@@ -819,7 +819,7 @@ def build_mail_body(trigger: str, status: list, details: list, latest: list) -> 
     """Uniform mail layout, parts separated by two blank lines:
     trigger, status, triggering information (own chapter), separator,
     last video list, footer."""
-    parts = [["This mail informs you:", trigger], status]
+    parts = [["This mail informs you:", trigger, "", timezone_note()], status]
     if details:
         parts.append(details)
     body = MAIL_GAP.join("\n".join(strip_blank_end(part)) for part in parts)
@@ -1200,7 +1200,8 @@ def build_latest_markdown(channels: list, state: dict, updated: str, run_str: st
         "# Last video per channel",
         "",
         f"Updated: {short_time(updated)}  ",
-        LATEST_GROUP_NOTE if groups and groups[0][0] else LATEST_SORT_NOTE,
+        (LATEST_GROUP_NOTE if groups and groups[0][0] else LATEST_SORT_NOTE) + "  ",
+        timezone_file_note(),
         "<br>",
         "",
     ]
@@ -1242,6 +1243,27 @@ def build_latest_text(overview: list, title: str) -> list:
     return [LATEST_TITLE, "=" * len(LATEST_TITLE), "", f"({title})", f"({overview[0]})"] + overview[1:]
 
 
+def timezone_label() -> str:
+    """E.g. 'W. Europe Standard Time (UTC+1)'. Name and offset as currently set
+    on this computer (changes automatically with daylight saving time)."""
+    now = dt.datetime.now().astimezone()
+    offset_minutes = int(now.utcoffset().total_seconds() // 60)
+    sign = "+" if offset_minutes >= 0 else "-"
+    hours, minutes = divmod(abs(offset_minutes), 60)
+    offset = f"UTC{sign}{hours}" + (f":{minutes:02d}" if minutes else "")
+    return f"{now.tzname() or 'local time'} ({offset})"
+
+
+def timezone_note() -> str:
+    """Sentence at the top of every mail."""
+    return f"All times in this mail in {timezone_label()}, the local time of the sending computer."
+
+
+def timezone_file_note() -> str:
+    """Line in the header of last-video-per-channel.txt / .md."""
+    return f"All times in {timezone_label()}, the local time of the computer that created this file."
+
+
 def latest_title_updated(updated: str) -> str:
     return f"updated {short_time(updated)}"
 
@@ -1259,7 +1281,9 @@ def latest_title_last_run() -> str:
 
 def write_latest_files(channels: list, state: dict, latest: list, updated: str, run_str: str = None) -> None:
     """Write the overview as plain text and as Markdown (with clickable links)."""
-    write_atomic_text(LATEST_FILE, "\n".join(latest))
+    # The list in the file gets the time zone below the header (the mails have it at the top)
+    text_lines = latest[:5] + [f"({timezone_file_note()})"] + latest[5:] if latest else latest
+    write_atomic_text(LATEST_FILE, "\n".join(text_lines))
     write_atomic_text(LATEST_MD_FILE, build_latest_markdown(channels, state, updated, run_str))
 
 
