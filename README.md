@@ -24,12 +24,12 @@ No additional packages required - just the standard library of Python 3.8+.
 | `config/*.example.json` | Templates for the three configuration files below |
 | `config/channels.json` | Channels to monitor (edit locally, not in Git/GitHub). |
 | `config/settings.json` | Mail addresses, SMTP server, thresholds (not in Git/GitHub). |
-| `config/secrets.json` | Gmail app password (confidential, not in Git/GitHub). |
+| `config/secrets.json` | Gmail app password and optional YouTube API key (confidential, not in Git/GitHub). |
 | `state/state.json` | Known video IDs and error counters (maintained by the Python script; hands off) |
 | `logs/log-last-3-days.txt` | Run log, newest run on top, older lines are deleted automatically after 3 days (adjustable with `log_retention_days`). |
 | `logs/mail-log-last-16-days.txt` | Mail log: only runs that sent (or tried to send) a mail, with the mail(s) verbatim, newest run on top, kept for 16 days (adjustable with `mail_log_retention_days`). |
-| `logs/last-video-per-channel.txt` | Newest video of every channel, listed with title, link, publication and detection time. Newest publication on top. Updated on every run. |
-| `logs/last-video-per-channel.md` | The same overview as a Markdown list with clickable links. |
+| `logs/last-video-per-channel.txt` | Newest video of every channel, listed with title, link, livestream details and detection time, grouped by state (see [Livestream details](#how-are-you-notified)). Updated on every run. |
+| `logs/last-video-per-channel.md` | The same overview as a Markdown list with clickable links, the groups as headings. |
 
 <br>
 
@@ -42,7 +42,7 @@ No additional packages required - just the standard library of Python 3.8+.
 2. Create a **Gmail** mailbox (or choose an existing one) through which the Python script may send the mails.
 3. Create an **app password** for this Gmail account
    (Google account -> Security -> 2-Step Verification (activate if necessary) -> App passwords).
-4. Enter this app password in `config/secrets.json` (`smtp_password`).
+4. Enter this app password in `config/secrets.json` (`smtp_password`). Optionally also enter a [YouTube API key](#youtube-api-key-optional) there (`youtube_api_key`), otherwise leave the placeholder.
 5. In `config/settings.json`, enter the sender address (`mail.sender` and `smtp.username`, both = Gmail address from step 2) and the recipient addresses (`mail.recipients`).
 6. Add the channels to `config/channels.json`:
 
@@ -89,6 +89,8 @@ Status (12 channels in total)
       9 channels are failing 1 to 9 times in a row
       0 channels are failing 10 times or more in a row
       3 channels without baseline because of errors
+
+Note: Failing feeds -> new livestream announcements are not detected for these channels; known livestreams are still updated (upcoming / live / ended).
 ```
 
 For the two lines "channels are failing" (channels currently not reachable), the boundary (in this example up to 9 and 10 or more) depends on the parameter `min_consecutive_failures` (set to 10 in this example). From this limit on, the error mail is sent.
@@ -151,17 +153,47 @@ Every mail (notification, error mail, test mail with last video list) has the sa
 This mail informs you:
 2 new entries
 
+
 Status (5 channels in total)
      3 channels up to date
      1 channel is failing 1 to 9 times in a row
      0 channels are failing 10 times or more in a row
      1 channel without baseline because of errors
 
-----------------------------------------
-<information that triggered the mail, e.g. title, link and publication time per new entry>
+Note: Failing feeds -> new livestream announcements are not detected for these channels; known livestreams are still updated (upcoming / live / ended).
 
-----------------------------------------
-<list "Last video per channel", same text as logs/last-video-per-channel.txt>
+
+==== New entries ====
+
+(Checked: 2026-10-30 22:01)
+
+<per channel: name, below it per new entry title, link and livestream details>
+
+
+- - - - - - - -
+
+
+Last video per channel
+======================
+
+(updated 2026-10-30 22:01)
+(Chapters sorted by: state (live, upcoming, ended, videos))
+
+
+==== Livestreams upcoming ====
+
+(sorted by upcoming start time first)
+
+<channels of this chapter>
+
+
+<further chapters (Livestreams ended, Videos, …) with the same layout>
+
+
+- - - - -
+Sent by: YouTube Livestream Notification Tool
+Source: https://github.com/pepe-hb9evt/Youtube-Livestream-Notification
+Author: Pepe HB9EVT, with Claude (Anthropic)
 ```
 
 Line "This mail informs you": possible triggers of a mail are:
@@ -173,7 +205,49 @@ Line "This mail informs you": possible triggers of a mail are:
 
 Manually triggered mails can be sent e.g. via the batch file.
 
-In the status, only lines that are not zero are shown.
+In the status, only lines that are not zero are shown. If the status reports failing feeds, a short note follows below it: for these channels new livestream announcements are not detected, but already known livestreams are still updated.
+
+**Livestream details**
+
+For every video (new entries and list "Last video per channel") a line shows its state. Times in local time, duration as h:mm:
+
+| State | Line in the mail |
+|---|---|
+| Livestream upcoming | `Livestream upcoming, starts today at 20:00` (or `tomorrow at …`, `on 2026-11-02 at …`) |
+| Livestream live | `Livestream live since 18:59` |
+| Livestream ended | `Livestream ended at 02:31, duration 2:33` |
+| Normal video | `Video published 2026-10-28 23:15, duration 0:12` |
+| State unknown | `Published: 2026-10-28 23:15` (time from the feed) |
+
+- If a point in time is not on the current day, the date is shown as well.
+- **Which videos per channel?** All live and all upcoming livestreams. If a channel has none, only the newest published video (ended livestream or normal video). A channel can therefore appear several times in the list. Upcoming livestreams without a start time (permanent placeholders of some channels) are ignored in the list; as a new entry in the mail they appear with `Livestream upcoming, start time not announced`.
+- **Where does the state come from?** The state is determined for every video in the feed (the 15 newest per channel), either via the YouTube Data API (with an [API key](#youtube-api-key-optional)) or via the watch webpage of the video (without a key or if the API does not answer).
+- **How often?** Every video is checked once. After that only as long as its state can change: live livestreams on every run, upcoming ones from 30 minutes before the start and otherwise every 6 hours. Ended livestreams and normal videos are not checked again, deleted or private videos are no longer shown.
+- **Without an API key**, at most 20 watch webpages are requested per run; the rest follows in the next runs. On the first run with many channels it therefore takes about an hour until all states are known.
+- If a changeable state was not determined in the current run, the time of the last check is added, e.g. `Livestream live since 22:38 (state checked at 01:16)`. For upcoming livestreams only if the check is older than 6 hours (they are only checked that often anyway); with menu item 3 always.
+- A failed request (e.g. consent or captcha page) does not count as a feed error; it is logged as WARN and repeated on the next run. After 3 failures in a row, the remaining requests of the run are skipped.
+- The list "Last video per channel" (mail and `.txt` file with chapters `==== … ====`, `.md` file with headings) is grouped by state; below every chapter title, the sort order is shown in brackets:
+  1. `Livestreams live now` (latest start on top)
+  2. `Livestreams upcoming` (next start on top)
+  3. `Livestreams ended` (only channels without a running or upcoming livestream; latest end on top)
+  4. `Videos` (newest on top)
+  5. `State unknown` (state not determined yet or no video known yet)
+
+  Empty groups are omitted.
+- With `"livestream_details": false` in `config/settings.json`, nothing is requested; then `Published: …` is shown as before, and the list is sorted by publication without groups.
+
+### YouTube API key (optional)
+
+With a free key for the YouTube Data API, the livestream states are determined more reliably and with far fewer requests (up to 50 videos per request, no captcha blocks). Without a key, everything works via the watch webpages.
+
+1. Sign in at [console.cloud.google.com](https://console.cloud.google.com/) with a Google account (e.g. the Gmail account used for sending the mails).
+2. In the project selector at the top, create a **New project**, name e.g. `UT-Livestream-Notification`.
+3. **APIs & Services -> Library**, search for **YouTube Data API v3** and click **Enable**.
+4. **APIs & Services -> Credentials -> Create credentials -> API key**.
+5. Edit the key: under **API restrictions**, allow only **YouTube Data API v3**.
+6. Enter the key in `config/secrets.json`: `"youtube_api_key": "<key>"`.
+
+Cost: none. The free quota is 10,000 units per day, one request costs 1 unit; with a 5-minute interval this is at most about 300 units per day. If the quota is used up or the key is invalid, a WARN line is logged and the watch webpages are used.
 
 <br>
 
@@ -301,7 +375,7 @@ Note: the window takes the focus every few minutes. Set `"enabled": false` for n
 
 ## Security
 
-- `config/secrets.json` contains the SMTP password. `channels.json` and `settings.json`
+- `config/secrets.json` contains the SMTP password and, if used, the YouTube API key. `channels.json` and `settings.json`
   reveal your mail addresses and which channels you watch.
   All three are excluded in `.gitignore` - never commit them.
 - There is a template (`*.example.json`) for all three JSON files. Only these templates are part of the repository.

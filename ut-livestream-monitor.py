@@ -39,6 +39,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from email.message import EmailMessage
@@ -73,6 +74,14 @@ DEFAULT_KEEP_OPEN_SECONDS = 60          # dev mode: terminal window stays open t
 RETRY_DELAY_SECONDS = 5           # wait before the single retry of a failed request
 DEFAULT_ERROR_THRESHOLD = 10      # consecutive failures before an error mail
 DEFAULT_DELAY_NOTE_MINUTES = 50   # outage this recent -> new entries flagged as possibly delayed
+DETAILS_MAX_FAILURES = 3          # watch webpage failures in a row -> no more detail requests this run
+WATCH_PAGE_BUDGET = 20            # max. watch webpage requests per run (without API key)
+UPCOMING_RECHECK_BEFORE_MINUTES = 30   # upcoming livestream: check again from this long before the start
+UPCOMING_RECHECK_HOURS = 6        # upcoming livestream: check again at least this often (rescheduled?)
+UPCOMING_FORGET_HOURS = 24        # upcoming, no longer in the feed and start this long ago -> forget
+API_BATCH_SIZE = 50               # YouTube Data API: max. video IDs per videos.list request
+API_URL = "https://www.googleapis.com/youtube/v3/videos"
+API_KEY_PLACEHOLDER = "PUT-YOUR-YOUTUBE-API-KEY-HERE"
 
 ATOM_NS = {
     "atom": "http://www.w3.org/2005/Atom",
@@ -535,6 +544,176 @@ def parse_feed(xml_bytes: bytes) -> list:
     return entries
 
 
+# --------------------------------------------------------------------------
+# Livestream details from the watch webpage (see youtube-livestream-detection.md)
+# --------------------------------------------------------------------------
+LIVE_UPCOMING, LIVE_LIVE, LIVE_ENDED = "UPCOMING", "LIVE", "ENDED"
+LIVE_VIDEO, LIVE_UNKNOWN = "VIDEO", "UNKNOWN"     # VIDEO = normal upload, no livestream
+LIVE_REMOVED = "REMOVED"                          # deleted or private -> not shown, not checked again
+LIVE_FINAL_STATES = (LIVE_ENDED, LIVE_VIDEO, LIVE_REMOVED)   # cannot change any more -> no new request
+
+PLAYER_RESPONSE_MARKER = "ytInitialPlayerResponse = "
+
+
+def player_response_text(html: str) -> str:
+    """The ytInitialPlayerResponse JSON part of the watch webpage (as text).
+    Restricting the search to it avoids matches from other videos on the webpage."""
+    start = html.find(PLAYER_RESPONSE_MARKER)
+    if start < 0:
+        raise RuntimeError("no player data on the watch webpage (consent or captcha page?)")
+    end = html.find("</script>", start)
+    return html[start:end if end > 0 else len(html)]
+
+
+def parse_live_info(html: str, now_str: str) -> dict:
+    """Livestream state and times of one video, e.g.
+    {"state": "ENDED", "start": "2026-10-22T23:57:49+00:00", "end": "...",
+     "length": 9180, "checked": "2026-10-30 10:00:00"}"""
+    text = player_response_text(html)
+
+    def get(pattern):
+        match = re.search(pattern, text)
+        return match.group(1) if match else None
+
+    is_live_content = get(r'"isLiveContent":(true|false)')
+    is_upcoming = get(r'"isUpcoming":(true|false)')
+    is_live_now = get(r'"isLiveNow":(true|false)')
+    start = get(r'"startTimestamp":"([^"]+)"')
+    end = get(r'"endTimestamp":"([^"]+)"')
+    scheduled = get(r'"scheduledStartTime":"(\d+)"')
+    length = get(r'"lengthSeconds":"(\d+)"')
+
+    # Check isUpcoming before isLive: an upcoming stream also has isLive true
+    if is_live_content is None:
+        if re.search(r'"playabilityStatus":\{"status":"(ERROR|LOGIN_REQUIRED|UNPLAYABLE)"', text):
+            return {"state": LIVE_REMOVED, "checked": now_str}   # deleted or private video
+        raise RuntimeError("no livestream fields in the player data")
+    if is_live_content != "true":
+        state = LIVE_VIDEO
+    elif is_upcoming == "true":
+        state = LIVE_UPCOMING
+        if scheduled:
+            start = dt.datetime.fromtimestamp(int(scheduled), tz=dt.timezone.utc).isoformat()
+    elif is_live_now == "true":
+        state = LIVE_LIVE
+    elif end:
+        state = LIVE_ENDED
+    else:
+        state = LIVE_UNKNOWN
+    return {"state": state, "start": start, "end": end,
+            "length": int(length) if length else 0, "checked": now_str}
+
+
+def fetch_live_info(video_id: str, timeout: int, now_str: str) -> dict:
+    url = f"https://www.youtube.com/watch?v={video_id}&hl=en"
+    return parse_live_info(http_get(url, timeout).decode("utf-8", errors="replace"), now_str)
+
+
+def iso_duration_seconds(value: str) -> int:
+    """ISO 8601 duration of the Data API -> seconds, e.g. 'PT1H2M3S' -> 3723."""
+    match = re.fullmatch(r"P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?", value or "")
+    if not match:
+        return 0
+    days, hours, minutes, seconds = (int(x or 0) for x in match.groups())
+    return ((days * 24 + hours) * 60 + minutes) * 60 + seconds
+
+
+def api_item_to_info(item: dict, now_str: str) -> dict:
+    """One item of the videos.list response -> same structure as parse_live_info."""
+    details = item.get("liveStreamingDetails")
+    broadcast = (item.get("snippet") or {}).get("liveBroadcastContent")
+    length = iso_duration_seconds((item.get("contentDetails") or {}).get("duration"))
+    info = {"state": LIVE_VIDEO, "start": None, "end": None, "length": length, "checked": now_str}
+    if not details:
+        return info
+    if details.get("actualEndTime"):
+        info.update(state=LIVE_ENDED, start=details.get("actualStartTime"), end=details["actualEndTime"])
+    elif broadcast == "live" or details.get("actualStartTime"):
+        info.update(state=LIVE_LIVE, start=details.get("actualStartTime"))
+    elif broadcast == "upcoming" or details.get("scheduledStartTime"):
+        info.update(state=LIVE_UPCOMING, start=details.get("scheduledStartTime"))
+    else:
+        info["state"] = LIVE_UNKNOWN
+    return info
+
+
+def fetch_api_details(video_ids: list, api_key: str, timeout: int, now_str: str) -> dict:
+    """YouTube Data API videos.list for up to API_BATCH_SIZE IDs (1 quota unit).
+    Returns {video_id: info}; IDs missing in the answer are deleted or private."""
+    query = urllib.parse.urlencode({
+        "part": "snippet,contentDetails,liveStreamingDetails",
+        "id": ",".join(video_ids),
+        "key": api_key,
+        "fields": "items(id,snippet/liveBroadcastContent,contentDetails/duration,liveStreamingDetails)",
+    })
+    answer = json.loads(http_get(f"{API_URL}?{query}", timeout).decode("utf-8"))
+    result = {vid: {"state": LIVE_REMOVED, "checked": now_str} for vid in video_ids}
+    for item in answer.get("items", []):
+        result[item["id"]] = api_item_to_info(item, now_str)
+    return result
+
+
+def to_local(value: str):
+    """ISO 8601 timestamp (UTC) -> naive local datetime, None if invalid."""
+    try:
+        return dt.datetime.fromisoformat((value or "").replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def format_duration(seconds) -> str:
+    """Duration as h:mm, e.g. 9180 -> '2:33'. Below one minute -> '0:01'."""
+    minutes = round((seconds or 0) / 60)
+    if minutes == 0 and seconds:
+        minutes = 1
+    return f"{minutes // 60}:{minutes % 60:02d}"
+
+
+def day_time(moment: dt.datetime, now: dt.datetime) -> str:
+    """'18:59' if moment is today, otherwise '2026-10-28 18:59'."""
+    return f"{moment:%H:%M}" if moment.date() == now.date() else f"{moment:%Y-%m-%d %H:%M}"
+
+
+def describe_video(video: dict, now: dt.datetime, run_str: str = None) -> str:
+    """One line about a video, depending on its livestream state, e.g.
+    'Livestream upcoming, starts tomorrow at 20:00'. Without livestream details
+    (disabled, request failed): 'Published: <feed time>'. A changeable state that
+    was not checked in this run gets '(state checked at hh:mm)' (never a final
+    state such as an ended livestream): a live stream
+    always, an upcoming one only if the check is older than UPCOMING_RECHECK_HOURS
+    (upcoming livestreams are checked only that often). run_str None (list from
+    the saved state): always."""
+    live = video.get("live") or {}
+    state = live.get("state")
+    start, end = to_local(live.get("start")), to_local(live.get("end"))
+    if state == LIVE_UPCOMING and start:
+        days = (start.date() - now.date()).days
+        when = ("today" if days == 0 else "tomorrow" if days == 1
+                else f"on {start:%Y-%m-%d}") + f" at {start:%H:%M}"
+        text = f"Livestream upcoming, starts {when}"
+    elif state == LIVE_UPCOMING:
+        text = "Livestream upcoming, start time not announced"
+    elif state == LIVE_LIVE and start:
+        text = f"Livestream live since {day_time(start, now)}"
+    elif state == LIVE_ENDED and end:
+        seconds = (end - start).total_seconds() if start else live.get("length")
+        text = f"Livestream ended at {day_time(end, now)}, duration {format_duration(seconds)}"
+    elif state == LIVE_VIDEO:
+        text = f"Video published {format_published(video.get('published'))}"
+        if live.get("length"):
+            text += f", duration {format_duration(live['length'])}"
+        return text
+    else:
+        return f"Published: {format_published(video.get('published'))}"
+    checked = parse_timestamp(live.get("checked"))
+    if checked and state not in LIVE_FINAL_STATES and live.get("checked") != run_str:
+        stale = (run_str is None or state != LIVE_UPCOMING
+                 or now - checked >= dt.timedelta(hours=UPCOMING_RECHECK_HOURS))
+        if stale:
+            text += f" (state checked at {day_time(checked, now)})"
+    return text
+
+
 def fetch_entries(channel_cfg: dict, ch_state: dict, timeout: int, log: RunLog) -> list:
     """Fetch the feed of one channel. Resolves and caches channel ID / feed URL."""
     name = channel_cfg.get("name") or channel_cfg["url"]
@@ -614,20 +793,43 @@ def plural(count: int, word: str, width: int = 0) -> str:
     return f"{count:>{width}} {word}{'' if count == 1 else 's'}"
 
 
-MAIL_SEPARATOR = "-" * 40
+MAIL_SEPARATOR = "- - - - - - - -"
+
+# Shown at the end of every mail
+MAIL_FOOTER = [
+    "- - - - -",
+    "Sent by: YouTube Livestream Notification Tool",
+    "Source: https://github.com/pepe-hb9evt/Youtube-Livestream-Notification",
+    "Author: Pepe HB9EVT, with Claude (Anthropic)",
+]
+
+
+MAIL_GAP = "\n\n\n"       # two blank lines between the parts of a mail
+
+
+def strip_blank_end(lines: list) -> list:
+    """lines without trailing blank lines."""
+    lines = list(lines)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
 
 
 def build_mail_body(trigger: str, status: list, details: list, latest: list) -> str:
-    """Uniform mail layout: trigger, status, triggering information, last video list."""
-    lines = ["This mail informs you:", trigger, ""] + status
+    """Uniform mail layout, parts separated by two blank lines:
+    trigger, status, triggering information (own chapter), separator,
+    last video list, footer."""
+    parts = [["This mail informs you:", trigger], status]
     if details:
-        lines += ["", MAIL_SEPARATOR] + details
+        parts.append(details)
+    body = MAIL_GAP.join("\n".join(strip_blank_end(part)) for part in parts)
     if latest:
-        lines += ["", MAIL_SEPARATOR] + latest
-    return "\n".join(lines)
+        body += MAIL_GAP + MAIL_SEPARATOR + MAIL_GAP + "\n".join(strip_blank_end(latest))
+    return body + MAIL_GAP + "\n".join(MAIL_FOOTER)
 
 
-def format_new_entries_mail(new_by_channel: list, status: list, latest: list) -> tuple:
+def format_new_entries_mail(new_by_channel: list, status: list, latest: list,
+                            now: dt.datetime, run_str: str) -> tuple:
     """new_by_channel: [(name, [entries], delay_note or None)],
     status: see build_status_lines, latest: see build_latest_text"""
     total = sum(len(items) for _, items, _ in new_by_channel)
@@ -638,37 +840,33 @@ def format_new_entries_mail(new_by_channel: list, status: list, latest: list) ->
     if any(note for _, _, note in new_by_channel):
         subject += " (possibly delayed)"
         trigger += " (possibly delayed)"
-    lines = []
+    lines = ["==== New entries ====", "", f"(Checked: {now:%Y-%m-%d %H:%M})", ""]
     for name, items, note in new_by_channel:
-        lines.append(f"=== {name} ===")
+        lines.append(name)
         if note:
-            lines.append("Note: This notification may be delayed.")
-            lines.append(f"      The YouTube feed reported errors for {note}.")
+            lines.append("  Note: This notification may be delayed.")
+            lines.append(f"  The YouTube feed reported errors for {note}.")
         for item in items:
-            lines.append(f"- {item['title']}")
+            lines.append(f"  {item['title']}")
             lines.append(f"  {item['link']}")
-            if item.get("published"):
-                lines.append(f"  Published: {format_published(item['published'])}")
+            if item.get("published") or item.get("live"):
+                lines.append(f"  {describe_video(item, now, run_str)}")
         lines.append("")
-    lines.append(f"Checked: {dt.datetime.now().strftime(TIMESTAMP_FORMAT)}")
     return subject, build_mail_body(trigger, status, lines, latest)
 
 
 def format_error_mail(failing: list, threshold: int, status: list, latest: list) -> tuple:
     subject = f"Recurring error on {len(failing)} source(s)"
     trigger = f"{plural(len(failing), 'source')} failed at least {threshold} times in a row"
-    lines = [
-        "This mail is sent at most once per day.",
-        "",
-    ]
+    lines = ["==== Failing sources ====", "", "(This mail is sent at most once per day.)", ""]
     for name, ch_state in failing:
-        lines.append(f"=== {name} ===")
+        lines.append(name)
         lines.append(f"  Consecutive failures: {ch_state.get('consecutive_failures')}")
         lines.append(f"  Failing since:        {ch_state.get('first_failure')}")
         lines.append(f"  Last error:           {ch_state.get('last_error')}")
         lines.append(f"  Last success:         {ch_state.get('last_success') or 'never'}")
         lines.append("")
-    lines.append(f"Details: logs/{LOG_FILE.name}")
+    lines.append(f"(Details: logs/{LOG_FILE.name})")
     return subject, build_mail_body(trigger, status, lines, latest)
 
 
@@ -728,7 +926,14 @@ def build_status_lines(channels: list, state_channels: dict, threshold: int,
         lines.append(f"{indent}{channels_text(counts['no_baseline'])} without baseline because of errors")
     if counts["not_checked"]:  # shown only if not 0, also with show_all
         lines.append(f"{indent}{channels_text(counts['not_checked'])} not checked yet")
+    if counts["below"] or counts["above"] or counts["no_baseline"]:
+        lines += ["", FEED_FAILURE_NOTE]
     return lines
+
+
+# Shown below the status (mails and --status) if feeds are failing
+FEED_FAILURE_NOTE = ("Note: Failing feeds -> new livestream announcements are not detected for these "
+                     "channels; known livestreams are still updated (upcoming / live / ended).")
 
 
 def load_threshold(settings: dict) -> int:
@@ -752,14 +957,42 @@ def update_latest_video(ch_state: dict, entries: list, now_str: str) -> None:
     if not newest:
         return
     previous = ch_state.get("latest_video") or {}
-    detected = previous.get("detected") if previous.get("video_id") == newest["video_id"] else None
+    same = previous.get("video_id") == newest["video_id"]
     ch_state["latest_video"] = {
         "video_id": newest["video_id"],
         "title": newest["title"],
         "link": newest["link"],
         "published": newest.get("published", ""),
-        "detected": detected or now_str,
+        "detected": (previous.get("detected") if same else None) or now_str,
     }
+    if same and previous.get("live"):
+        ch_state["latest_video"]["live"] = previous["live"]  # livestream details
+
+
+def sync_channel_videos(ch_state: dict, entries: list, now: dt.datetime, now_str: str) -> None:
+    """Keep ch_state['videos'] = {video_id: {title, link, published, detected, live}}
+    in line with the feed: add new entries, forget entries that left the feed
+    (except upcoming / live livestreams, which stay until they are over)."""
+    videos = ch_state.setdefault("videos", {})
+    latest = ch_state.get("latest_video") or {}
+    feed_ids = set()
+    for entry in entries:
+        feed_ids.add(entry["video_id"])
+        video = videos.setdefault(entry["video_id"], {"detected": now_str})
+        video.update(video_id=entry["video_id"], title=entry["title"], link=entry["link"],
+                     published=entry.get("published", ""))
+        if not video.get("live") and latest.get("video_id") == entry["video_id"] and latest.get("live"):
+            video["live"] = latest["live"]                       # details known from before
+            video["detected"] = latest.get("detected") or video["detected"]
+    for video_id in [v for v in videos if v not in feed_ids]:
+        live = videos[video_id].get("live") or {}
+        start = to_local(live.get("start"))
+        if live.get("state") == LIVE_LIVE:
+            continue
+        if (live.get("state") == LIVE_UPCOMING and start
+                and now - start < dt.timedelta(hours=UPCOMING_FORGET_HOURS)):
+            continue
+        del videos[video_id]
 
 
 def format_published(value: str) -> str:
@@ -790,6 +1023,20 @@ def feed_type_label(channel_cfg: dict, ch_state: dict) -> str:
 
 LATEST_SORT_NOTE = ("Sorted by: publication date, newest first "
                     "(channels without a known video at the end)")
+LATEST_GROUP_NOTE = "Chapters sorted by: state (live, upcoming, ended, videos)"
+
+# List groups by livestream state, in output order (index = sort order):
+# (state, chapter title, notes shown below the title)
+LATEST_GROUPS = [
+    (LIVE_LIVE, "Livestreams live now", ["sorted by start time, latest first"]),
+    (LIVE_UPCOMING, "Livestreams upcoming", ["sorted by upcoming start time first"]),
+    (LIVE_ENDED, "Livestreams ended", ["Here are only those livestream channels listed with no running or upcoming livestream.",
+                                       "sorted by end time, latest first"]),
+    (LIVE_VIDEO, "Videos", ["only channels with feed 'all uploads', 'only videos' or 'only shorts'",
+                            "sorted by publication, newest first"]),
+    (None, "State unknown", ["state not determined yet or no video known",
+                             "sorted by publication, newest first"]),
+]
 
 
 def published_sort_key(video: dict):
@@ -800,40 +1047,133 @@ def published_sort_key(video: dict):
         return 0
 
 
+def latest_group(video) -> int:
+    """Index in LATEST_GROUPS for a latest video (or None)."""
+    live_state = ((video or {}).get("live") or {}).get("state")
+    for index, (group_state, _, _) in enumerate(LATEST_GROUPS[:-1]):
+        if live_state == group_state:
+            return index
+    return len(LATEST_GROUPS) - 1
+
+
+def iso_sort_key(value: str) -> float:
+    """ISO 8601 time as UTC timestamp for sorting (0 if unknown)."""
+    try:
+        return dt.datetime.fromisoformat((value or "").replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0
+
+
+def latest_sort_key(item: dict) -> tuple:
+    """Group order first (live, upcoming, ended, videos, unknown); within a group
+    newest first, upcoming livestreams next first, channels without video last."""
+    video = item["video"]
+    if not video:
+        return (len(LATEST_GROUPS), 1, 0)
+    live = video.get("live") or {}
+    group = latest_group(video)
+    state = LATEST_GROUPS[group][0]
+    if state == LIVE_UPCOMING:
+        return (group, 0, iso_sort_key(live.get("start")))           # next first
+    if state == LIVE_LIVE:
+        return (group, 0, -iso_sort_key(live.get("start")))          # latest start first
+    if state == LIVE_ENDED:
+        return (group, 0, -iso_sort_key(live.get("end")))            # latest end first
+    return (group, 0, -published_sort_key(video))                    # newest first
+
+
+def has_livestream_details(items: list) -> bool:
+    """True if at least one video has a known livestream state (-> grouped list)."""
+    return any(latest_group(i["video"]) < len(LATEST_GROUPS) - 1 for i in items)
+
+
+def grouped_latest_items(channels: list, state: dict) -> list:
+    """[(group title or None, [notes], [items])]. Grouped by livestream state;
+    without any livestream details one untitled group sorted by publication date."""
+    items = collect_latest_items(channels, state)
+    if not has_livestream_details(items):
+        return [(None, [], items)] if items else []
+    groups = []
+    for item in sorted(items, key=latest_sort_key):   # sorted() is stable
+        _, title, notes = LATEST_GROUPS[latest_group(item["video"])]
+        if not groups or groups[-1][0] != title:
+            groups.append((title, notes, []))
+        groups[-1][2].append(item)
+    return groups
+
+
+def is_hidden_video(video: dict) -> bool:
+    """Deleted / private video or upcoming livestream without start time."""
+    live = video.get("live") or {}
+    return (live.get("state") == LIVE_REMOVED
+            or (live.get("state") == LIVE_UPCOMING and not live.get("start")))
+
+
+def select_channel_videos(ch_state: dict) -> list:
+    """Videos of one channel for the list: all live and all upcoming livestreams;
+    if there are none, the newest published video (ended livestream, video or
+    not checked yet). Ignored: deleted / private videos and upcoming livestreams
+    without start time (permanent placeholders of some channels).
+    Without a video store (old state): the latest video."""
+    videos = [v for v in (ch_state.get("videos") or {}).values() if not is_hidden_video(v)]
+    if not videos and not ch_state.get("videos"):
+        return [ch_state["latest_video"]] if ch_state.get("latest_video") else []
+    active = [v for v in videos if (v.get("live") or {}).get("state") in (LIVE_LIVE, LIVE_UPCOMING)]
+    if active:
+        return active
+    return [max(videos, key=published_sort_key)] if videos else []
+
+
 def collect_latest_items(channels: list, state: dict) -> list:
     """[{name, video or None, failures}] sorted by publication date, newest first.
-    Channels without a known video keep their channels.json order at the end."""
+    Channels without a known video keep their channels.json order at the end.
+    A channel can have several items (several live / upcoming livestreams)."""
     items = []
     for channel_cfg in channels:
         ch_state = state.get("channels", {}).get(channel_cfg["url"]) or {}
-        items.append({
+        common = {
             "name": channel_cfg.get("name") or channel_cfg["url"],
             "label": feed_type_label(channel_cfg, ch_state),
-            "video": ch_state.get("latest_video"),
             "failures": ch_state.get("consecutive_failures", 0),
-        })
+        }
+        selected = select_channel_videos(ch_state)
+        items.extend(dict(common, video=video) for video in (selected or [None]))
     with_video = sorted((i for i in items if i["video"]),
                         key=lambda i: published_sort_key(i["video"]), reverse=True)
     return with_video + [i for i in items if not i["video"]]
 
 
-def build_latest_overview(channels: list, state: dict) -> list:
-    """Plain-text lines listing the newest known video of every channel."""
+def build_latest_overview(channels: list, state: dict, now: dt.datetime = None,
+                          run_str: str = None) -> list:
+    """Plain-text lines listing the newest known video of every channel.
+    run_str: time of the current run (None for lists from the saved state)."""
+    now = now or dt.datetime.now()
+    groups = grouped_latest_items(channels, state)
+    lines = [LATEST_GROUP_NOTE if groups and groups[0][0] else LATEST_SORT_NOTE]
+    for title, notes, items in groups:
+        lines = strip_blank_end(lines) + ["", ""]      # two blank lines before every chapter
+        if title:
+            lines += [f"==== {title} ====", ""] + [f"({note})" for note in notes] + [""]
+        for item in items:
+            lines.extend(overview_item_lines(item, now, run_str))
+    return strip_blank_end(lines)
+
+
+def overview_item_lines(item: dict, now: dt.datetime, run_str: str) -> list:
+    """Plain-text block of one channel in the list."""
     g = RunLog.INDENT_GROUP
-    lines = [LATEST_SORT_NOTE, ""]
-    for item in collect_latest_items(channels, state):
-        video = item["video"]
-        lines.append(f"{item['name']} {item['label']}")
-        if video:
-            lines.append(f"{g}'{video['title']}'")
-            lines.append(f"{g}{video['link']}")
-            lines.append(f"{g}Published: {format_published(video.get('published'))}"
-                         f" --- Detected: {short_time(video.get('detected'))}")
-        else:
-            lines.append(f"{g}no video known yet")
-        if item["failures"]:
-            lines.append(f"{g}(feed currently failing: failure #{item['failures']})")
-        lines.append("")
+    video = item["video"]
+    lines = [f"{item['name']} {item['label']}"]
+    if video:
+        lines.append(f"{g}'{video['title']}'")
+        lines.append(f"{g}{video['link']}")
+        lines.append(f"{g}{describe_video(video, now, run_str)}"
+                     f" --- Detected: {short_time(video.get('detected'))}")
+    else:
+        lines.append(f"{g}no video known yet")
+    if item["failures"]:
+        lines.append(f"{g}(feed currently failing: failure #{item['failures']})")
+    lines.append("")
     return lines
 
 
@@ -850,30 +1190,36 @@ def short_time(value: str) -> str:
     return parsed.strftime("%Y-%m-%d %H:%M") if parsed else (value or "unknown")
 
 
-def build_latest_markdown(channels: list, state: dict, updated: str) -> str:
-    """Markdown list: one block of 3-4 lines per channel, titles as clickable links.
-    Lines end with two spaces = line break within the block. Times as hh:mm."""
+def build_latest_markdown(channels: list, state: dict, updated: str, run_str: str = None) -> str:
+    """Markdown list: one block of 3-4 lines per channel, titles as clickable links,
+    one heading per livestream state group. Lines end with two spaces = line break
+    within the block. Times as hh:mm."""
+    now = dt.datetime.now()
+    groups = grouped_latest_items(channels, state)
     lines = [
         "# Last video per channel",
         "",
         f"Updated: {short_time(updated)}  ",
-        LATEST_SORT_NOTE,
+        LATEST_GROUP_NOTE if groups and groups[0][0] else LATEST_SORT_NOTE,
         "<br>",
         "",
     ]
-    for item in collect_latest_items(channels, state):
-        video = item["video"]
-        lines.append(f"Channel: {md_escape(item['name'])} {item['label']}  ")
-        if video:
-            lines.append(f"Last video: [{md_escape(video['title'])}]({video['link']})  ")
-            lines.append(f"Published: {format_published(video.get('published'))} --- "
-                         f"Detected: {short_time(video.get('detected'))}  ")
-        else:
-            lines.append("Last video: no video known yet  ")
-            lines.append("Published: - --- Detected: -  ")
-        if item["failures"]:
-            lines.append(f"Note: feed currently failing (failure #{item['failures']})  ")
-        lines.append("")
+    for title, notes, items in groups:
+        if title:
+            lines += [f"## {title}", ""] + [f"*({md_escape(note)})*  " for note in notes] + [""]
+        for item in items:
+            video = item["video"]
+            lines.append(f"Channel: {md_escape(item['name'])} {item['label']}  ")
+            if video:
+                lines.append(f"Last video: [{md_escape(video['title'])}]({video['link']})  ")
+                lines.append(f"{describe_video(video, now, run_str)} --- "
+                             f"Detected: {short_time(video.get('detected'))}  ")
+            else:
+                lines.append("Last video: no video known yet  ")
+                lines.append("Published: - --- Detected: -  ")
+            if item["failures"]:
+                lines.append(f"Note: feed currently failing (failure #{item['failures']})  ")
+            lines.append("")
     return "\n".join(lines)
 
 
@@ -884,16 +1230,20 @@ def write_atomic_text(path: Path, text: str) -> None:
     os.replace(tmp_path, path)
 
 
+LATEST_TITLE = "Last video per channel"
+
+
 def build_latest_text(overview: list, title: str) -> list:
-    """Lines of last-video-per-channel.txt (also used as the list in every mail).
-    overview starts with the "Sorted by" line; a separator follows below it."""
+    """Lines of last-video-per-channel.txt (also used as the list in every mail):
+    title, underline, '(updated ...)', '(sort note)', then the chapters.
+    overview starts with the sort note line."""
     if not overview:
         return []
-    return [title] + overview[:1] + ["=" * 25] + overview[1:]
+    return [LATEST_TITLE, "=" * len(LATEST_TITLE), "", f"({title})", f"({overview[0]})"] + overview[1:]
 
 
 def latest_title_updated(updated: str) -> str:
-    return f"Last video per channel - updated {short_time(updated)}"
+    return f"updated {short_time(updated)}"
 
 
 def last_run_text() -> str:
@@ -904,13 +1254,13 @@ def last_run_text() -> str:
 
 def latest_title_last_run() -> str:
     """Title for lists built from the saved state (no feed access in this run)."""
-    return f"Last video per channel - state of last run {last_run_text()}"
+    return f"state of last run {last_run_text()}"
 
 
-def write_latest_files(channels: list, state: dict, latest: list, updated: str) -> None:
+def write_latest_files(channels: list, state: dict, latest: list, updated: str, run_str: str = None) -> None:
     """Write the overview as plain text and as Markdown (with clickable links)."""
     write_atomic_text(LATEST_FILE, "\n".join(latest))
-    write_atomic_text(LATEST_MD_FILE, build_latest_markdown(channels, state, updated))
+    write_atomic_text(LATEST_MD_FILE, build_latest_markdown(channels, state, updated, run_str))
 
 
 # --------------------------------------------------------------------------
@@ -932,6 +1282,99 @@ def describe_recent_outage(ch_state: dict, now: dt.datetime, window_minutes: int
         return None
     minutes = round((end - start).total_seconds() / 60)
     return f"{minutes} minutes ({start:%H:%M} - {end:%H:%M})"
+
+
+def video_needs_check(video: dict, now: dt.datetime) -> bool:
+    """Does the livestream state of this video have to be (re)determined?"""
+    live = video.get("live") or {}
+    state = live.get("state")
+    if state in LIVE_FINAL_STATES:
+        return False
+    if state == LIVE_UPCOMING:
+        start, checked = to_local(live.get("start")), parse_timestamp(live.get("checked"))
+        if not checked or now - checked >= dt.timedelta(hours=UPCOMING_RECHECK_HOURS):
+            return True
+        # Without start time (placeholder): only every UPCOMING_RECHECK_HOURS
+        return bool(start) and start - now <= dt.timedelta(minutes=UPCOMING_RECHECK_BEFORE_MINUTES)
+    return True     # not checked yet, live (end?) or unknown
+
+
+def refresh_video_details(channels: list, state: dict, new_by_channel: list, api_key: str,
+                          timeout: int, now: dt.datetime, now_str: str, log: RunLog) -> None:
+    """Determine the livestream state of the feed videos of all channels.
+    Order: new entries of this run, live, upcoming due for a check, not checked yet
+    (newest first). With an API key all of them in a few videos.list requests,
+    otherwise via watch webpages, at most WATCH_PAGE_BUDGET per run (the rest
+    follows in the next runs). Failures are logged as WARN, never as feed failures."""
+    owner = {}                   # video_id -> (channel name, video dict)
+    for channel_cfg in channels:
+        ch_state = state["channels"].get(channel_cfg["url"]) or {}
+        for video_id, video in (ch_state.get("videos") or {}).items():
+            owner[video_id] = (channel_cfg.get("name") or channel_cfg["url"], ch_state["videos"], video)
+
+    new_ids = [item["video_id"] for _, items, _ in new_by_channel for item in items]
+    rank = {LIVE_LIVE: 1, LIVE_UPCOMING: 2}
+    due = [vid for vid, (_, _, video) in owner.items() if vid in new_ids or video_needs_check(video, now)]
+    due.sort(key=lambda vid: (0 if vid in new_ids else rank.get(((owner[vid][2].get("live") or {}).get("state")), 3),
+                              -published_sort_key(owner[vid][2])))
+
+    results = {}
+    if api_key and due:
+        try:
+            for start in range(0, len(due), API_BATCH_SIZE):
+                if run_time_exceeded():
+                    break
+                results.update(fetch_api_details(due[start:start + API_BATCH_SIZE], api_key, timeout, now_str))
+        except Exception as exc:
+            log.note(f"WARN: YouTube Data API failed ({describe_error(exc)}), using watch webpages")
+    api_count = len(results)
+    remaining = [vid for vid in due if vid not in results]
+
+    failures = requests = skipped = 0
+    for video_id in remaining:
+        if (RETRIES_DISABLED or failures >= DETAILS_MAX_FAILURES or requests >= WATCH_PAGE_BUDGET
+                or run_time_exceeded()):
+            skipped += 1
+            continue
+        requests += 1
+        try:
+            results[video_id] = fetch_live_info(video_id, timeout, now_str)
+            failures = 0
+        except Exception as exc:
+            failures += 1
+            log.add("WARN", owner[video_id][0],
+                    f"livestream details of {video_id} not available: {describe_error(exc)}")
+
+    for video_id, info in results.items():
+        name, videos, video = owner[video_id]
+        if info["state"] == LIVE_REMOVED:
+            # Kept as long as the feed lists it, so it is not requested again
+            log.add("WARN", name, f"video {video_id} deleted or private, not shown in the list")
+        video["live"] = info
+
+    # New entries (mail) and latest_video (fallback display) get the same details
+    for name, items, _ in new_by_channel:
+        for item in items:
+            info = results.get(item["video_id"])
+            if info and info["state"] != LIVE_REMOVED:
+                item["live"] = info
+                log.add("New entry", name, f"{item['video_id']}: {describe_video(item, now, now_str)}")
+    for channel_cfg in channels:
+        ch_state = state["channels"].get(channel_cfg["url"]) or {}
+        latest = ch_state.get("latest_video")
+        known = (ch_state.get("videos") or {}).get((latest or {}).get("video_id"))
+        if latest and known and known.get("live"):
+            latest["live"] = known["live"]
+
+    if due:
+        parts = []
+        if api_key:
+            parts.append(f"{api_count} via API")
+        if requests:
+            parts.append(f"{requests} via watch webpage(s)")
+        if skipped:
+            parts.append(f"{skipped} postponed to the next runs")
+        log.note(f"Livestream details: {len(due)} video(s) due - " + ", ".join(parts or ["none checked"]))
 
 
 # --------------------------------------------------------------------------
@@ -958,7 +1401,8 @@ def run(args, log: RunLog) -> int:
             latest = build_latest_text(build_latest_overview(channels, saved_state), latest_title_last_run())
         except Exception as exc:
             status, latest = [f"Status and last video list not available: {exc}"], []
-        details = ["The list was requested manually (--send-list).",
+        details = ["==== Requested manually ====", "",
+                   "The list was requested manually (--send-list).",
                    f"State of last run: {last_run_text()}",
                    f"Sent: {dt.datetime.now().strftime(TIMESTAMP_FORMAT)}",
                    "No feed was checked for this mail."]
@@ -1034,6 +1478,7 @@ def run(args, log: RunLog) -> int:
                 ch_state["last_outage"] = {"start": ch_state.get("first_failure") or now_str, "end": now_str}
             ch_state.update(consecutive_failures=0, first_failure=None, last_error=None, last_success=now_str)
             update_latest_video(ch_state, entries, now_str)
+            sync_channel_videos(ch_state, entries, now, now_str)
 
             known = set(ch_state.get("known_video_ids", []))
             if not ch_state.get("initialized"):
@@ -1075,18 +1520,32 @@ def run(args, log: RunLog) -> int:
                 log.note(message)
                 progress(message)
 
+    # --- Livestream details (watch webpage) for new entries and latest videos ---
+    if settings.get("livestream_details", True):
+        api_key = (secrets.get("youtube_api_key") or "").strip()
+        if api_key == API_KEY_PLACEHOLDER:
+            api_key = ""
+        refresh_video_details(channels, state, new_by_channel, api_key, timeout, now, now_str, log)
+    else:
+        # Disabled: forget stored details, otherwise outdated states would be shown
+        for ch_state in state["channels"].values():
+            (ch_state.get("latest_video") or {}).pop("live", None)
+            for video in (ch_state.get("videos") or {}).values():
+                video.pop("live", None)
+
     # --- Last video per channel: text file (also in dry runs) and mail section ---
     updated = dt.datetime.now().strftime(TIMESTAMP_FORMAT)
-    latest = build_latest_text(build_latest_overview(channels, state), latest_title_updated(updated))
+    latest = build_latest_text(build_latest_overview(channels, state, now, now_str),
+                               latest_title_updated(updated))
     try:
-        write_latest_files(channels, state, latest, updated)
+        write_latest_files(channels, state, latest, updated, now_str)
     except OSError as exc:
         log.note(f"ERROR: Writing {LATEST_FILE.name} / {LATEST_MD_FILE.name} failed: {exc}")
     status = build_status_lines(channels, state["channels"], threshold)
 
     # --- Notification about new entries ---
     if new_by_channel:
-        subject, body = format_new_entries_mail(new_by_channel, status, latest)
+        subject, body = format_new_entries_mail(new_by_channel, status, latest, now, now_str)
         if args.dry_run:
             log.note(f"Mail not sent (dry run): {subject}")
             log.previews.append("----- MAIL (not sent, dry run) -----\nSubject: " + subject + "\n\n" + body + "\n-----")

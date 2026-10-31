@@ -15,6 +15,7 @@
   "log_retention_days": 3,
   "mail_log_retention_days": 16,
   "delay_note_window_minutes": 50,
+  "livestream_details": true,
   "dev_mode": {
     "enabled": false,
     "keep_open_after_run_seconds": 60

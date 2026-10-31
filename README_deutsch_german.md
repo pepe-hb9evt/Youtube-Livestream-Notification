@@ -28,12 +28,12 @@ Keine zusätzlichen Pakete nötig - nur die Standardbibliothek von Python 3.8+.
 | `config/*.example.json` | Vorlagen für die drei folgenden Konfigurationsdateien |
 | `config/channels.json` | Zu überwachende Kanäle (lokal bearbeiten, nicht in Git/GitHub). |
 | `config/settings.json` | Mail-Adressen, SMTP-Server, Schwellwerte (nicht in Git/GitHub). |
-| `config/secrets.json` | Gmail-App-Passwort (vertraulich, nicht in Git/GitHub). |
+| `config/secrets.json` | Gmail-App-Passwort und optional YouTube-API-Schlüssel (vertraulich, nicht in Git/GitHub). |
 | `state/state.json` | Bekannte Video-IDs und Fehlerzähler (wird vom Python-Skript bearbeitet; Finger weg) |
 | `logs/log-last-3-days.txt` | Protokoll der Läufe, neuester Lauf zuoberst, ältere Zeilen werden automatisch nach 3 Tagen gelöscht (einstellbar mit `log_retention_days`). |
 | `logs/mail-log-last-16-days.txt` | Mail-Protokoll: nur Läufe, die eine Mail verschickt (oder es versucht) haben, mit der/den Mail(s) im Wortlaut, neuester Lauf zuoberst, 16 Tage aufbewahrt (einstellbar mit `mail_log_retention_days`). |
-| `logs/last-video-per-channel.txt` | Neuestes Video jedes Kanals aufgelistet mit Titel, Link, Veröffentlichung und Meldezeit. Neueste Veröffentlichung ist zuoberst. Wird bei jedem Lauf nachgeführt. |
-| `logs/last-video-per-channel.md` | Dieselbe Übersicht als Markdown-Liste mit anklickbaren Links. |
+| `logs/last-video-per-channel.txt` | Neuestes Video jedes Kanals aufgelistet mit Titel, Link, Livestream-Angaben und Meldezeit, gruppiert nach Zustand (siehe [Livestream-Angaben](#wie-wird-man-benachrichtigt)). Wird bei jedem Lauf nachgeführt. |
+| `logs/last-video-per-channel.md` | Dieselbe Übersicht als Markdown-Liste mit anklickbaren Links, die Gruppen als Überschriften. |
 
 <br>
 
@@ -46,7 +46,7 @@ Keine zusätzlichen Pakete nötig - nur die Standardbibliothek von Python 3.8+.
 2. Ein **Gmail**-Postfach eröffnen (oder ein bestehendes wählen), über das das Python-Skript die Mails versenden darf.
 3. Bei diesem Gmail-Konto ein **App-Passwort** erstellen
    (Google-Konto -> Sicherheit -> 2‑Faktor-Authentifizierung (ggf. aktivieren) -> App-Passwörter).
-4. Dieses App-Passwort in `config/secrets.json` eintragen (`smtp_password`).
+4. Dieses App-Passwort in `config/secrets.json` eintragen (`smtp_password`). Optional dort auch einen [YouTube-API-Schlüssel](#youtube-api-schlüssel-optional) eintragen (`youtube_api_key`), sonst den Platzhalter stehen lassen.
 5. In `config/settings.json` die Absenderadresse (`mail.sender` und `smtp.username`, beide = Gmail-Adresse aus Schritt 2) und die Empfängeradressen (`mail.recipients`) eintragen.
 6. Kanäle in `config/channels.json` erfassen:
 
@@ -69,20 +69,18 @@ Der manuelle Start wird typischerweise zum Testen verwendet (insbesondere wenn n
 
 Für den manuellen Start `Menu for ut-livestream-monitor-py.bat` per Doppelklick starten. Das Menü fragt, welche Variante ausgeführt werden soll:
 
-```
-1  Normal run                     (Feeds prüfen, Mail bei neuen Einträgen)
-2  Dry run                        (nur prüfen, keine Mail, Stand unverändert)
-3  Test mail with last video list (Stand des letzten Laufs, keine Feed-Abfrage)
-4  Reset                          (bekannte Videos vergessen, neuer Ausgangsstand)
-5  Show log                       (logs\log-last-3-days.txt)
-6  Outage status                  (Überblick über Feed-Fehler pro Kanal)
-7  Show options                   (alle Optionen von ut-livestream-monitor.py)
-0  Exit
-```
+`1  Normal run` (Feeds prüfen, Mail bei neuen Einträgen) <br>
+`2  Dry run` (nur prüfen, keine Mail, Stand unverändert) <br>
+`3  Test mail with last video list` (Stand des letzten Laufs, keine Feed-Abfrage) <br>
+`4  Reset` (bekannte Videos vergessen, neuer Ausgangsstand; mit Kontrollfrage) <br>
+`5  Show log` (logs\log-last-3-days.txt) <br>
+`6  Outage status` (Überblick über Feed-Fehler pro Kanal) <br>
+`7  Show options` (alle Optionen von ut-livestream-monitor.py) <br>
+`0  Exit`
 
 Oder direkt in der Konsole: `python ut-livestream-monitor.py [--dry-run | --send-list | --reset | --status | --help]`
 
-`--send-list` dient auch als Testmail: Sie wird auch dann verschickt, wenn `channels.json` oder der gespeicherte Stand noch fehlen. Die frühere Option `--test-mail` funktioniert weiterhin als Alias von `--send-list`.
+Menüpunkt 3 (`--send-list`) dient auch als Testmail: Sie wird auch dann verschickt, wenn `channels.json` oder der gespeicherte Stand noch fehlen. 
 
 Mit Menüpunkt 6 (`--status`) wird ein Störungsstatus angezeigt, der aus dem gespeicherten Stand des letzten Laufs ermittelt wird (es erfolgt also keine Feed-Abfrage). Dieser Status sieht wie folgt aus:
 
@@ -93,6 +91,8 @@ Status (12 channels in total)
       9 channels are failing 1 to 9 times in a row
       0 channels are failing 10 times or more in a row
       3 channels without baseline because of errors
+
+Note: Failing feeds -> new livestream announcements are not detected for these channels; known livestreams are still updated (upcoming / live / ended).
 ```
 
 Bei den zwei Zeilen "channels are failing" (Kanäle sind z.Zt. nicht abrufbar) ist die Abgrenzung (hier im Beispiel bis 9 bzw. 10 und mehr) abhängig vom Parameter `min_consecutive_failures` (Hier im Beispiel auf 10 gesetzt). Ab dieser Grenze wird die Fehler-Mail verschickt.
@@ -155,17 +155,47 @@ Jede Mail (Benachrichtigung, Fehler-Mail, Testmail mit Video-Liste) hat denselbe
 This mail informs you:
 2 new entries
 
+
 Status (5 channels in total)
      3 channels up to date
      1 channel is failing 1 to 9 times in a row
      0 channels are failing 10 times or more in a row
      1 channel without baseline because of errors
 
-----------------------------------------
-<Information, die die Mail ausgelöst hat, z. B. pro neuem Eintrag Titel, Link und Veröffentlichungszeit>
+Note: Failing feeds -> new livestream announcements are not detected for these channels; known livestreams are still updated (upcoming / live / ended).
 
-----------------------------------------
-<Liste „Last video per channel“, gleicher Text wie logs/last-video-per-channel.txt>
+
+==== New entries ====
+
+(Checked: 2026-10-30 22:01)
+
+<pro Kanal: Name, darunter pro neuem Eintrag Titel, Link und Livestream-Angaben>
+
+
+- - - - - - - -
+
+
+Last video per channel
+======================
+
+(updated 2026-10-30 22:01)
+(Chapters sorted by: state (live, upcoming, ended, videos))
+
+
+==== Livestreams upcoming ====
+
+(sorted by upcoming start time first)
+
+<Kanäle dieses Kapitels>
+
+
+<weitere Kapitel (Livestreams ended, Videos, …) im gleichen Aufbau>
+
+
+- - - - -
+Sent by: YouTube Livestream Notification Tool
+Source: https://github.com/pepe-hb9evt/Youtube-Livestream-Notification
+Author: Pepe HB9EVT, with Claude (Anthropic)
 ```
 
 Zeile "This mail informs you": Auslöser eines Mails können sein:
@@ -177,7 +207,49 @@ Zeile "This mail informs you": Auslöser eines Mails können sein:
 
 Manuell ausgelöste Mails können z.B. über die Batch-Datei erfolgen.
 
-Beim Status werden nur Zeilen ausgewiesen, die nicht null sind.
+Beim Status werden nur Zeilen ausgewiesen, die nicht null sind. Meldet der Status gestörte Feeds, steht darunter ein kurzer Hinweis: Für diese Kanäle werden neue Livestream-Ankündigungen nicht erkannt, bereits bekannte Livestreams aber weiterhin aktualisiert.
+
+**Livestream-Angaben**
+
+Zu jedem Video (neue Einträge und Liste „Last video per channel“) steht eine Zeile mit seinem Zustand. Zeiten in Lokalzeit, Dauer als h:mm:
+
+| Zustand | Zeile im Mail |
+|---|---|
+| Livestream anstehend | `Livestream upcoming, starts today at 20:00` (bzw. `tomorrow at …`, `on 2026-11-02 at …`) |
+| Livestream läuft | `Livestream live since 18:59` |
+| Livestream beendet | `Livestream ended at 02:31, duration 2:33` |
+| Normales Video | `Video published 2026-10-28 23:15, duration 0:12` |
+| Zustand unbekannt | `Published: 2026-10-28 23:15` (Zeit aus dem Feed) |
+
+- Liegt ein Zeitpunkt nicht am aktuellen Tag, wird das Datum mit angezeigt.
+- **Welche Videos pro Kanal?** Alle laufenden und alle anstehenden Livestreams. Hat ein Kanal keine, dann nur das neueste publizierte Video (beendeter Livestream oder normales Video). Ein Kanal kann also mehrfach in der Liste stehen. Anstehende Livestreams ohne Startzeit (dauerhafte Platzhalter mancher Kanäle) werden in der Liste ignoriert; als neuer Eintrag im Mail erscheinen sie mit `Livestream upcoming, start time not announced`.
+- **Woher der Zustand?** Für jedes Video im Feed (die 15 neuesten pro Kanal) wird der Zustand ermittelt, entweder über die YouTube Data API (mit [API-Schlüssel](#youtube-api-schlüssel-optional)) oder über die Watch-Seite des Videos (ohne Schlüssel oder wenn die API nicht antwortet).
+- **Wie oft?** Jedes Video wird einmal geprüft. Danach nur noch, solange sich der Zustand ändern kann: laufende Livestreams bei jedem Lauf, anstehende ab 30 Minuten vor dem Start und sonst alle 6 Stunden. Beendete Livestreams und normale Videos werden nicht mehr geprüft, gelöschte oder private Videos nicht mehr angezeigt.
+- **Ohne API-Schlüssel** werden höchstens 20 Watch-Seiten pro Lauf abgerufen; der Rest folgt in den nächsten Läufen. Beim ersten Lauf mit vielen Kanälen dauert es deshalb etwa eine Stunde, bis alle Zustände bekannt sind.
+- Wurde ein veränderlicher Zustand nicht im aktuellen Lauf ermittelt, steht dahinter, wann er zuletzt geprüft wurde, z. B. `Livestream live since 22:38 (state checked at 01:16)`. Bei anstehenden Livestreams nur, wenn die Prüfung älter als 6 Stunden ist (sie werden ohnehin nur so oft geprüft); bei Menüpunkt 3 immer.
+- Ein fehlgeschlagener Abruf (z. B. Consent- oder Captcha-Seite) zählt nicht als Feed-Fehler; er steht als WARN im Log und wird beim nächsten Lauf wiederholt. Nach 3 Fehlern in Folge werden die restlichen Abrufe des Laufs übersprungen.
+- Die Liste „Last video per channel“ (Mail und `.txt`-Datei mit Kapiteln `==== … ====`, `.md`-Datei mit Überschriften) ist nach Zustand gruppiert; unter jedem Kapiteltitel steht in Klammern, wie sortiert wird:
+  1. `Livestreams live now` (zuletzt gestartet zuoberst)
+  2. `Livestreams upcoming` (nächster Start zuoberst)
+  3. `Livestreams ended` (nur Kanäle ohne laufenden oder anstehenden Livestream; zuletzt beendet zuoberst)
+  4. `Videos` (neueste zuoberst)
+  5. `State unknown` (Zustand noch nicht ermittelt oder noch kein Video bekannt)
+
+  Leere Gruppen werden weggelassen.
+- Mit `"livestream_details": false` in `config/settings.json` wird nichts abgerufen; dann steht wie bisher `Published: …`, und die Liste ist ohne Gruppen nach Veröffentlichung sortiert.
+
+### YouTube-API-Schlüssel (optional)
+
+Mit einem kostenlosen Schlüssel für die YouTube Data API werden die Livestream-Zustände zuverlässiger und mit viel weniger Abrufen ermittelt (bis zu 50 Videos pro Anfrage, keine Captcha-Sperren). Ohne Schlüssel funktioniert alles über die Watch-Seiten.
+
+1. Auf [console.cloud.google.com](https://console.cloud.google.com/) mit einem Google-Konto anmelden (z. B. dem Gmail-Konto für den Mail-Versand).
+2. Oben in der Projektauswahl **Neues Projekt** anlegen, Name z. B. `UT-Livestream-Notification`.
+3. **APIs & Dienste -> Bibliothek**, nach **YouTube Data API v3** suchen und **Aktivieren**.
+4. **APIs & Dienste -> Anmeldedaten -> Anmeldedaten erstellen -> API-Schlüssel**.
+5. Den Schlüssel bearbeiten: unter **API-Einschränkungen** nur **YouTube Data API v3** zulassen.
+6. Den Schlüssel in `config/secrets.json` eintragen: `"youtube_api_key": "<Schlüssel>"`.
+
+Kosten: keine. Das Gratis-Kontingent beträgt 10'000 Einheiten pro Tag, eine Anfrage kostet 1 Einheit; bei einem 5-Minuten-Rhythmus sind es höchstens etwa 300 Einheiten pro Tag. Ist das Kontingent erschöpft oder der Schlüssel ungültig, steht eine WARN-Zeile im Log und es werden die Watch-Seiten verwendet.
 
 <br>
 
@@ -305,7 +377,7 @@ Hinweis: Das Fenster nimmt sich alle paar Minuten den Fokus. Für den Normalbetr
 
 ## Sicherheit
 
-- `config/secrets.json` enthält das SMTP-Passwort. `channels.json` und `settings.json`
+- `config/secrets.json` enthält das SMTP-Passwort und ggf. den YouTube-API-Schlüssel. `channels.json` und `settings.json`
   verraten deine Mail-Adressen und welche Kanäle du beobachtest.
   Alle drei sind in `.gitignore` ausgeschlossen - niemals committen.
 - Für alle drei JSON-Dateien gibt es eine Vorlage (`*.example.json`). Nur diese Vorlagen sind Teil des Repositorys.
